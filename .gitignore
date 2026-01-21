@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+build/
+dist/
+*.egg-info/
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+
+# Datos (No queremos subir CSVs pesados a GitHub)
+*.csv
+*.parquet
+data/raw/
+data/processed/
+
+# IDEs
+.vscode/
+.idea/
