@@ -307,7 +307,7 @@ class OrderFlowFeatures:
         """
         # Close > Open = Presión Compradora (+1), else (-1)
         side = np.where(df[f'{prefix}Close'] >= df[f'{prefix}Open'], 1, -1)
-        delta = side * df[f'{prefix}Volume']
+        delta = side * df[f'{prefix}Volume']    
         
         return delta.rolling(window=window).sum()
 
@@ -661,6 +661,13 @@ class RiskFeaturePipeline:
         self.synth_engine = SyntheticEngineFeatures()
         self.synth_ml = SyntheticArbitrageML()
         self.markov = MarkovRegimeFeatures()
+
+
+    def get_feature_names(self, asset_names):
+        """Retorna la lista de nombres de todas las columnas que generará el transform."""
+        # Útil para que el selector sepa qué buscar
+        pass
+
     def transform(self, df: pd.DataFrame, asset_names: list, benchmark_name: str = None) -> pd.DataFrame:
         df_out = df.copy()
         
