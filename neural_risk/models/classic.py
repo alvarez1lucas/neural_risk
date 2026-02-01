@@ -1,7 +1,7 @@
 from .base import RiskModel
 import xgboost as xgb
 import numpy as np
-
+#classic.py
 class XGBoostVolModel(RiskModel):
     """
     Modelo de XGBoost optimizado para la predicción de volatilidad realizada.

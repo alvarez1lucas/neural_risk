@@ -1,0 +1,237 @@
+# NEURAL RISK v0.2.0 - CONFIGURACIÓN GLOBAL
+# Production-ready, escalable, optimizable
+
+# ============================================================================
+# 1. MODO DE OPERACIÓN
+# ============================================================================
+mode: "production"  # "development" | "production" | "backtest"
+
+# ============================================================================
+# 2. TIMEFRAMES & VENTANAS (optimizadas para CRIPTO)
+# ============================================================================
+timeframes:
+  short: 10      # 1 semana (trading táctico)
+  medium: 30     # 1 mes (swing trades)
+  long: 100      # 3 meses (trend following)
+  strategic: 1000  # 1 año (crisis detection)
+
+# ============================================================================
+# 3. EXCHANGE APIs
+# ============================================================================
+exchanges:
+  primary: "binance"  # Binance, Kraken, Coinbase, etc.
+  credentials:
+    api_key: "${BINANCE_API_KEY}"  # Lee de env vars
+    api_secret: "${BINANCE_API_SECRET}"
+  
+  # Assets a monitorear
+  assets: ["BTC", "ETH", "SOL", "AVAX", "ARB"]
+  
+  # Pairs (ej: BTC/USDT)
+  quote_currency: "USDT"
+
+# ============================================================================
+# 4. DATABASE (para persistencia)
+# ============================================================================
+database:
+  type: "sqlite"  # "sqlite" | "postgresql"
+  path: "./data/neural_risk.db"  # Solo para SQLite
+  
+  # PostgreSQL config (si type=postgresql)
+  host: "${DB_HOST}"
+  port: 5432
+  user: "${DB_USER}"
+  password: "${DB_PASSWORD}"
+  dbname: "neural_risk"
+
+# ============================================================================
+# 5. CACHE (velocidad crítica en live trading)
+# ============================================================================
+cache:
+  backend: "redis"  # "redis" | "memory" | "disk"
+  
+  # Redis
+  redis_host: "localhost"
+  redis_port: 6379
+  redis_db: 0
+  
+  # TTL (time-to-live)
+  data_ttl: 60  # Datos frescos cada 60s
+  model_ttl: 3600  # Modelos cada 1 hora
+  
+  # Tamaño máximo en-memory
+  max_memory_mb: 1024
+
+# ============================================================================
+# 6. SEÑALES & THRESHOLDS (PASO 5)
+# ============================================================================
+signals:
+  # Generación
+  long_threshold: 0.60      # Agreement > 60% = LONG
+  short_threshold: -0.60    # Agreement < -60% = SHORT
+  min_confidence: 0.50      # Confianza mínima para operar
+  
+  # Stop Loss (dinámico)
+  sl_adaptive_threshold: 0.70  # 0.50=loose, 0.70=moderate, 0.90=tight
+  
+  # Position Sizing (Kelly)
+  fractional_kelly: 0.25    # 25% de Kelly recomendado (seguridad)
+  max_position_size: 0.10   # Máximo 10% del portfolio por trade
+  
+  # Staking/Lending
+  base_staking_apy: 0.05    # 5% base APY cuando HOLD
+  staking_min_amount: 100   # USDT mínimo para stakear
+
+# ============================================================================
+# 7. EVALUACIÓN DE EXPERTOS (métricas)
+# ============================================================================
+expert_evaluation:
+  lookback_window: 100  # Últimos 100 trades
+  
+  # Pesos para composite score
+  sortino_weight: 0.40      # MEJOR para crashes cripto
+  win_rate_weight: 0.30
+  profit_factor_weight: 0.20
+  sharpe_weight: 0.10
+  
+  # Métrica ideal (normalización)
+  ideal_sortino: 2.0
+  ideal_profit_factor: 2.0
+  ideal_sharpe: 1.5
+
+# ============================================================================
+# 8. MODELO TRAINING (offline)
+# ============================================================================
+training:
+  schedule: "0 0 * * *"  # Cron: 00:00 UTC diariamente
+  
+  # Datos de entrenamiento
+  train_test_split: 0.8
+  validation_split: 0.1
+  
+  # Parámetros por modelo
+  models:
+    HMM:
+      n_states: 3
+      covariance_type: "full"
+    
+    XGBoost:
+      n_estimators: 200
+      max_depth: 6
+      learning_rate: 0.1
+    
+    GARCH:
+      p: 1
+      q: 1
+    
+    LSTM:
+      hidden_size: 64
+      num_layers: 2
+      dropout: 0.1
+      learning_rate: 0.001
+    
+    Transformer:
+      hidden_size: 64
+      num_heads: 4
+      num_layers: 2
+      dropout: 0.1
+
+# ============================================================================
+# 8B. CYCLE TIMING (CRÍTICO - validar con benchmark_timing.py)
+# ============================================================================
+cycle_timing:
+  # RECOMENDACIÓN: Validar con scripts/benchmark_timing.py ANTES de deploy
+  # Valores por defecto: 300s (5 min) = SAFE para APIs gratuitas
+  # Mínimo recomendado: 60s (si timing test OK)
+  
+  data_fetcher_interval: 300      # segundos (fetch + cache + DB write)
+  engine_interval: 300            # segundos (9 expertos + PASO 5)
+  executor_interval: 300          # segundos (order placement)
+  
+  # ROADMAP: Escalado gradual
+  #  Fase 1 (48h): 300s + 2 assets → Si ✅ Sortino>1.5
+  #  Fase 2 (7d):  180s + 5 assets → Si ✅ Win Rate>55%
+  #  Fase 3 (14d): 120s + 5 assets → Si ✅ Profit Factor>1.5
+  #  Fase 4 (30+): 60s + 5 assets  → Full throttle
+
+# ============================================================================
+# 9. EXECUTION (órdenes en exchange)
+# ============================================================================
+execution:
+  # Tipo de orden
+  order_type: "market"  # "market" | "limit"
+  
+  # Límites de seguridad
+  max_orders_per_minute: 5
+  max_daily_loss_pct: 0.05  # Stop if -5% daily loss
+  
+  # Parámetros
+  limit_price_deviation: 0.01  # 1% de desviación si es limit
+  
+  # Retry logic
+  max_retries: 3
+  retry_delay_ms: 1000
+
+# ============================================================================
+# 10. MONITORING & ALERTAS
+# ============================================================================
+monitoring:
+  # Actualización de dashboard
+  dashboard_refresh_interval: 30  # segundos
+  
+  # Log de trades
+  log_trades: true
+  log_path: "./logs/trades.log"
+  
+  # Alertas
+  alerts:
+    email_on_stop_loss: false
+    email_on_large_loss: true
+    large_loss_threshold: 1000  # USDT
+    
+    telegram_bot_token: "${TELEGRAM_BOT_TOKEN}"
+    telegram_chat_id: "${TELEGRAM_CHAT_ID}"
+
+# ============================================================================
+# 11. PERFORMANCE & OPTIMIZACIONES
+# ============================================================================
+performance:
+  # Paralelización
+  n_workers: 4  # Threads para expertos paralelos
+  use_gpu: false  # True si tienes GPU para LSTM/Transformer
+  
+  # Batch processing
+  batch_size: 32
+  
+  # Memory limits
+  max_memory_gb: 8
+
+# ============================================================================
+# 12. LOGGING
+# ============================================================================
+logging:
+  level: "INFO"  # "DEBUG" | "INFO" | "WARNING" | "ERROR"
+  format: "json"  # "json" | "text"
+  
+  console_output: true
+  file_output: true
+  file_path: "./logs/neural_risk.log"
+
+# ============================================================================
+# 13. DESARROLLO & BACKTEST
+# ============================================================================
+backtest:
+  # Datos históricos
+  data_path: "./data/BTC_USD_data.csv"
+  
+  # Período
+  start_date: "2021-01-01"
+  end_date: "2025-12-31"
+  
+  # Simulación
+  initial_capital: 100000
+  slippage_pct: 0.001  # 0.1% por trade
+  commission_pct: 0.001  # 0.1% comisión exchange
+  
+  # Reinicio (si falla)
+  continue_on_error: true
