@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from .layers import VariableSelectionNetwork, GatedResidualNetwork
-
+#risk_model.py
 class NeuralRiskModel(nn.Module):
     def __init__(self, num_features, hidden_size=64, num_heads=4, dropout=0.1):
         super().__init__()

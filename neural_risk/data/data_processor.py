@@ -15,46 +15,60 @@ class DataProcessor:
         pass
 
     def auto_clean(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Pipeline maestro de limpieza automática para DataFrames financieros.
-        
-        Realiza:
-        1. Inferencia y conversión inteligente de tipos de datos.
-        2. Detección de fechas.
-        3. Relleno financiero lógico (Forward Fill para precios, 0 para volumen).
-        4. Eliminación de filas vacías residuales.
-        
-        Args:
-            df (pd.DataFrame): DataFrame crudo (OHLCV, Tasas, etc).
-            
-        Returns:
-            pd.DataFrame: DataFrame limpio y listo para cálculo.
-        """
+        """Pipeline de limpieza optimizado."""
         df = df.copy()
-        
-        # 1. Optimización de Tipos (Object -> Float/Datetime)
         df = self._optimize_types(df)
+        if not isinstance(df.index, pd.DatetimeIndex) and 'Date' in df.columns:
+            df['Date'] = pd.to_datetime(df['Date'])
+            df.set_index('Date', inplace=True)
         
-        # 2. Ordenar por índice si es fecha
-        if isinstance(df.index, pd.DatetimeIndex):
-            df = df.sort_index()
-
-        # 3. Lógica de Relleno Financiero (Financial Imputation)
-        # Identificamos columnas de Volumen
-        vol_cols = [c for c in df.columns if 'volume' in c.lower() or 'vol' in c.lower()]
+        df = df.sort_index()
+        vol_cols = [c for c in df.columns if 'vol' in c.lower()]
         price_cols = [c for c in df.columns if c not in vol_cols]
         
-        # Precios: Forward Fill (El precio de ayer es la mejor predicción del precio de hoy si falta data)
-        # Importante: NO usar interpolación lineal en precios, inventa movimientos que no existen.
-        if price_cols:
-            df[price_cols] = df[price_cols].ffill()
-            
-        # Volumen: Si falta, asumimos 0 actividad
-        if vol_cols:
-            df[vol_cols] = df[vol_cols].fillna(0)
-            
-        # Limpieza final de NaNs al inicio de la serie (donde no hay ffill posible)
+        if price_cols: df[price_cols] = df[price_cols].ffill()
+        if vol_cols: df[vol_cols] = df[vol_cols].fillna(0)
+        
         return df.dropna()
+
+    def _optimize_types(self, df: pd.DataFrame) -> pd.DataFrame:
+        for col in df.columns:
+            if df[col].dtype == 'object':
+                try:
+                    df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce')
+                except:
+                    try: df[col] = pd.to_datetime(df[col])
+                    except: pass
+        return df
+    
+    def prepare_portfolio_df(self, assets_data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+        """
+        Toma un diccionario de activos {'BTC': df1, 'SPY': df2}
+        y devuelve un único DF alineado y listo para el Jurado.
+        """
+        processed_dfs = []
+        
+        for ticker, df in assets_data.items():
+            # 1. Limpieza individual
+            df_clean = self.auto_clean(df)
+            # 2. Renombrar con prefijo: 'Close' -> 'BTC_Close'
+            df_renamed = df_clean.add_prefix(f"{ticker}_")
+            processed_dfs.append(df_renamed)
+            
+        # 3. Merge Externo (Outer Join) para no perder días
+        combined = pd.concat(processed_dfs, axis=1, join='outer')
+        
+        # 4. Relleno post-merge (Si SPY cierra y BTC no, mantenemos el precio de SPY)
+        combined = combined.ffill().dropna()
+        
+        print(f"📊 Portfolio alineado: {len(combined.columns)} columnas para {list(assets_data.keys())}")
+        return combined
+    
+    def get_returns(self, df: pd.DataFrame, method: str = 'log') -> pd.DataFrame:
+        """Calcula retornos para todas las columnas del portfolio."""
+        if method == 'log':
+            return np.log(df / df.shift(1)).dropna()
+        return df.pct_change().dropna()
 
     def _optimize_types(self, df: pd.DataFrame) -> pd.DataFrame:
         """Sub-rutina interna para inferencia de tipos."""

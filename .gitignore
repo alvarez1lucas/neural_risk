@@ -20,3 +20,30 @@ data/processed/
 # IDEs
 .vscode/
 .idea/
+
+# Internal documentation (responses to user, not for public)
+RESPUESTA_*.md
+RESUMEN_*.md
+SESSION_*.md
+VALIDACIÓN_*.md
+SETUP_*.md
+DEPLOY_*.md
+PRE_DEPLOY_*.md
+QUICK_START_*.md
+GUIA_*.md
+IMPLEMENTACIÓN_*.md
+INTEGRACION_*.md
+EJEMPLOS_*.md
+CHECKLIST_*.md
+ARQUITECTURA_*.md
+RESULTADO_*.md
+INDICE_*.md
+
+# Logs and temporary files
+logs/
+*.log
+*.db
+*.pkl
+
+# Models cache
+data/trained_models.pkl

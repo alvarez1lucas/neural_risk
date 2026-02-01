@@ -5,63 +5,44 @@ from torch.utils.data import DataLoader
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
-
+from sklearn.preprocessing import RobustScaler
+from torch.utils.data import TensorDataset
+#trainer.py
 class RiskTrainer:
     def __init__(self, model, lr=1e-3, device=None):
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model = model.to(self.device)
         self.optimizer = optim.Adam(self.model.parameters(), lr=lr, weight_decay=1e-5)
-        
-        # Usamos Gaussian NLL Loss: penaliza mala predicción y mala estimación de incertidumbre
         self.criterion = nn.GaussianNLLLoss()
-        self.scaler = StandardScaler()
+        self.scaler = RobustScaler() # Cambio a Robust para manejar e+09
 
-    def prepare_data(self, df):
-        """Normaliza las 60+ features para que el Deep Learning converja."""
-        # Fit del scaler solo con datos de entrenamiento (evitar data leakage)
-        scaled_data = self.scaler.fit_transform(df)
-        return pd.DataFrame(scaled_data, columns=df.columns, index=df.index)
+    def create_sequences(self, df, target, window_size=10):
+        """Convierte DF plano en ventanas temporales [Batch, Time, Features]"""
+        X, y = [], []
+        for i in range(len(df) - window_size):
+            X.append(df.iloc[i : i + window_size].values)
+            y.append(target.iloc[i + window_size])
+        return torch.FloatTensor(np.array(X)), torch.FloatTensor(np.array(y))
 
-    def train_epoch(self, dataloader):
-        self.model.train()
-        total_loss = 0
+    def prepare_data(self, df_features, target, train_split=0.8):
+        """Prepara el pipeline de datos de punta a punta."""
+        # 1. Limpieza de columnas no numéricas (como la 'date' con NaNs que mencionaste)
+        df_numeric = df_features.select_dtypes(include=[np.number])
         
-        for batch_x, batch_y in dataloader:
-            batch_x, batch_y = batch_x.to(self.device), batch_y.to(self.device)
-            
-            self.optimizer.zero_grad()
-            
-            # El modelo escupe: Media, Varianza, y los Pesos del VSN
-            mu, sigma, feature_weights = self.model(batch_x)
-            
-            # batch_y debe tener forma [batch, 1]
-            loss = self.criterion(mu, batch_y.unsqueeze(1), sigma)
-            
-            loss.backward()
-            self.optimizer.step()
-            
-            total_loss += loss.item()
-            
-        return total_loss / len(dataloader)
-
-    def monitor_vsn_importance(self, dataloader, feature_names):
-        """
-        Extrae qué está 'pensando' el Feature Selector dinámico.
-        Esencial para la '3era derivada' de decisiones.
-        """
-        self.model.eval()
-        all_weights = []
+        # 2. Split cronológico (No aleatorio, para trading es vital)
+        split_idx = int(len(df_numeric) * train_split)
+        train_df = df_numeric.iloc[:split_idx]
+        test_df = df_numeric.iloc[split_idx:]
         
-        with torch.no_grad():
-            for batch_x, _ in dataloader:
-                _, _, weights = self.model(batch_x.to(self.device))
-                all_weights.append(weights.mean(dim=(0, 1)).cpu().numpy())
+        # 3. Escalamiento robusto (Ajustamos solo con train)
+        scaled_train = self.scaler.fit_transform(train_df)
+        scaled_test = self.scaler.transform(test_df) # Usamos los parámetros de train
         
-        # Promediamos la importancia de cada feature en el dataset
-        avg_weights = np.mean(all_weights, axis=0)
-        importance_df = pd.DataFrame({
-            'feature': feature_names,
-            'importance': avg_weights.flatten()
-        }).sort_values(by='importance', ascending=False)
+        # 4. Crear secuencias para la LSTM/Attention
+        X_train, y_train = self.create_sequences(pd.DataFrame(scaled_train), target.iloc[:split_idx])
+        X_test, y_test = self.create_sequences(pd.DataFrame(scaled_test), target.iloc[split_idx:])
         
-        return importance_df
+        train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=32, shuffle=False)
+        test_loader = DataLoader(TensorDataset(X_test, y_test), batch_size=32, shuffle=False)
+        
+        return train_loader, test_loader

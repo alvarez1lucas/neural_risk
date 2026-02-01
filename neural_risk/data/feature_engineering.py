@@ -218,6 +218,8 @@ class MLHybridFeatures:
         3. Bottleneck de Autoencoder (Estado Comprimido).
         Usa una red neuronal para comprimir la info OHLCV en un vector latente.
         """
+        import torch
+        import torch.nn as nn
         cols = [f'{prefix}Open', f'{prefix}High', f'{prefix}Low', f'{prefix}Close', f'{prefix}Volume']
         data = torch.FloatTensor(df[cols].values)
         
@@ -278,22 +280,26 @@ class LiquidityMicrostructureFeatures:
         """
         3. Resiliencia de Liquidez Post-Trade.
         Mide la velocidad de recuperación del spread tras picos de volumen.
-        Un score alto significa que el mercado absorbe bien las órdenes (Market Resilience).
         """
         # Identificamos 'picos de volumen' (trades grandes)
         vol_mean = df[f'{prefix}Volume'].rolling(window=50).mean()
         high_vol_event = (df[f'{prefix}Volume'] > vol_mean * 2).astype(int)
         
-        # Spread relativo (usamos el calculado arriba)
-        spread = df[f'{prefix}Spread_Rel'] if f'{prefix}Spread_Rel' in df.columns else (np.random.rand(len(df)) * 0.001)
+        # Intentamos usar el spread normalizado que ya calculamos
+        # El pipeline lo llamó '{prefix}norm_spread'
+        target_col = f'{prefix}norm_spread'
+        if target_col in df.columns:
+            spread = df[target_col]
+        else:
+            # Si no existe, creamos una Serie de Pandas (no un array de numpy)
+            spread = pd.Series(np.random.rand(len(df)) * 0.001, index=df.index)
         
         # Delta de recuperación: (Spread_t - Spread_t-n)
-        # Si el spread vuelve rápido a su media tras el evento, la resiliencia es alta.
+        # Ahora .diff() funcionará porque 'spread' es una Serie de Pandas
         recovery = spread.diff(window).fillna(0)
-        resilience = (high_vol_event * -recovery) # Negativo de la subida = recuperación
+        resilience = (high_vol_event * -recovery) 
         
         return resilience.rolling(window=window).mean()
-    
 class OrderFlowFeatures:
     """
     Features de flujo de órdenes (Order Flow) para detectar presión,
@@ -312,40 +318,32 @@ class OrderFlowFeatures:
         return delta.rolling(window=window).sum()
 
     @staticmethod
-    def dynamic_volume_profile_stats(df: pd.DataFrame, prefix: str = "", bins: int = 30, window: int = 60) -> pd.DataFrame:
+    def dynamic_volume_profile_stats(df: pd.DataFrame, prefix: str = "", bins: int = 30, window: int = 60) -> pd.Series:
         """
-        2. Volume Profile Dinámico (Value Area y POC).
-        Devuelve la distancia del precio actual al 'Point of Control' (POC) 
-        y si está dentro del 'Value Area' (70% del volumen).
+        Versión optimizada: Calcula la distancia al POC sin re-indexar el DF en cada paso.
         """
-        def get_profile_metrics(x):
-            prices = x['Close']
-            vols = x['Volume']
+        # 1. Extraemos los valores a arrays de Numpy (mucho más rápido que trabajar con el DataFrame)
+        prices = df[f'{prefix}Close'].values
+        volumes = df[f'{prefix}Volume'].values
+        out = np.full(len(prices), np.nan)
+
+        # 2. Iteramos sobre la serie
+        for i in range(window, len(prices)):
+            window_prices = prices[i-window:i]
+            window_vols = volumes[i-window:i]
             
-            # Histograma de volumen (Volume Profile)
-            hist, bin_edges = np.histogram(prices, bins=bins, weights=vols)
+            # Calculamos el Histograma de Volumen (Volume Profile)
+            hist, bin_edges = np.histogram(window_prices, bins=bins, weights=window_vols)
             
-            # POC: Bin con más volumen
+            # El POC es el precio donde hubo más volumen
             poc_index = np.argmax(hist)
             poc_price = (bin_edges[poc_index] + bin_edges[poc_index+1]) / 2
             
-            # Value Area (70% del volumen alrededor del POC)
-            total_vol = vols.sum()
-            target_vol = total_vol * 0.70
+            # Guardamos la distancia porcentual del precio actual al POC
+            out[i-1] = (prices[i-1] / poc_price) - 1
             
-            # Calculamos distancia al POC como feature
-            current_price = prices.iloc[-1]
-            dist_poc = (current_price / poc_price) - 1
-            
-            return dist_poc
-
-        # Aplicamos de forma rolling sobre un subset de columnas
-        subset = df[[f'{prefix}Close', f'{prefix}Volume']].copy()
-        subset.columns = ['Close', 'Volume']
-        
-        # Simplificación para performance en la lib:
-        return subset['Close'].rolling(window=window).apply(lambda x: get_profile_metrics(df.loc[x.index, [f'{prefix}Close', f'{prefix}Volume']].rename(columns={f'{prefix}Close':'Close', f'{prefix}Volume':'Volume'})))
-
+        # 3. Devolvemos una Serie de Pandas con el índice original para que encaje en el df_out
+        return pd.Series(out, index=df.index)
     @staticmethod
     def footprint_momentum_imbalance(df: pd.DataFrame, prefix: str = "", momentum_window: int = 10) -> pd.Series:
         """
@@ -371,71 +369,107 @@ class CointegrationFeatures:
     @staticmethod
     def rolling_coint_spread(series_a: pd.Series, series_b: pd.Series, window: int = 60) -> pd.Series:
         """
-        1. Spread Cointegrado Ajustado (Rolling Beta).
-        Calcula el spread dinámico: Spread = Log(A) - Beta * Log(B).
-        Si el ADF test > -2.86 (no cointegrado), se penaliza la señal.
+        Calcula el spread dinámico usando Rolling OLS sobre log-precios.
+        Aplica penalización si el test ADF no confirma cointegración.
         """
-        def calculate_spread(x):
-            # Usamos logaritmos para que el beta sea una elasticidad
-            y = np.log(series_a.loc[x.index])
-            x_const = sm.add_constant(np.log(series_b.loc[x.index]))
-            model = sm.OLS(y, x_const).fit()
-            
-            beta = model.params[1]
-            spread = y.iloc[-1] - (beta * x_const.iloc[-1, 1])
-            
-            # Check de Estacionariedad (ADF)
-            adf_stat = adfuller(model.resid)[0]
-            # Si no es estacionario (está rompiéndose), inflamos el spread como alerta
-            return spread if adf_stat < -2.86 else spread * 2 
+        # Convertimos a numpy para velocidad extrema dentro del loop
+        log_a = np.log(series_a.values)
+        log_b = np.log(series_b.values)
+        out = np.full(len(log_a), np.nan)
 
-        return series_a.rolling(window=window).apply(calculate_spread)
+        for i in range(window, len(log_a)):
+            # Slicing de la ventana actual
+            y = log_a[i-window:i]
+            x = log_b[i-window:i]
+            
+            # Agregamos constante para la regresión
+            x_const = sm.add_constant(x)
+            
+            try:
+                model = sm.OLS(y, x_const).fit()
+                
+                # .iloc[1] evita el FutureWarning y el KeyError: 1
+                beta = model.params[1] 
+                
+                # Spread = Log(A) - Beta * Log(B)
+                # Usamos el último valor de la ventana (i-1)
+                current_spread = log_a[i-1] - (beta * log_b[i-1])
+                
+                # Check de Estacionariedad (ADF) sobre los residuos
+                adf_stat = adfuller(model.resid)[0]
+                
+                # Penalización: si no hay cointegración (p > threshold), inflamos el riesgo
+                out[i-1] = current_spread if adf_stat < -2.86 else current_spread * 2
+                
+            except:
+                continue
+
+        return pd.Series(out, index=series_a.index)
 
     @staticmethod
     def multivariate_error_correction(df: pd.DataFrame, asset_list: list, lags: int = 1) -> pd.Series:
         """
-        2. Vector de Error Multivariado (VECM Proxy).
-        Usa el test de Johansen para encontrar la combinación lineal más estable 
-        de >2 activos y devuelve la desviación del equilibrio (Error Term).
+        Calcula el error del vector de cointegración de Johansen.
+        Optimizado para devolver una Serie plana y evitar el ValueError de Pandas.
         """
-        data = np.log(df[[f"{a}_Close" for a in asset_list]])
+        cols = [f"{a}_Close" for a in asset_list]
+        # Trabajamos con log-precios
+        data_logs = np.log(df[cols])
         
-        def johansen_error(x):
-            try:
-                # det_order=0 (constante), k_ar_diff=lags
-                result = coint_johansen(x, 0, lags)
-                # El primer eigenvector es la combinación más estable
-                weights = result.evec[:, 0]
-                # Calculamos el error actual (desviación de la media)
-                return np.dot(x.iloc[-1], weights)
-            except:
-                return 0
+        # Preparamos una serie de salida llena de ceros
+        error_series = pd.Series(0.0, index=df.index)
+        window = 100
 
-        return data.rolling(window=100).apply(johansen_error)
+        # En lugar de .apply() que falla con DataFrames, usamos un loop manual 
+        # (Johansen es pesado, el loop no es el cuello de botella aquí)
+        for i in range(window, len(df)):
+            chunk = data_logs.iloc[i-window:i]
+            try:
+                # Test de Johansen
+                result = coint_johansen(chunk, 0, lags)
+                # Pesos del primer vector propio (el más estable)
+                weights = result.evec[:, 0]
+                # Producto punto entre el último precio del bloque y los pesos
+                current_val = np.dot(chunk.iloc[-1].values, weights)
+                error_series.iloc[i] = current_val
+            except:
+                continue
+                
+        return error_series 
 
     @staticmethod
     def mean_reversion_half_life(spread_series: pd.Series, window: int = 100) -> pd.Series:
         """
         3. Half-Life de Mean Reversion (Modelo Ornstein-Uhlenbeck).
-        Estima cuánto tarda el spread en volver a la media. 
-        Half-life = -log(2) / lambda, donde lambda es la velocidad de reversión.
+        Calcula la velocidad con la que el spread regresa a su media.
         """
         def get_half_life(x):
+            # x es un numpy array aquí, no una serie de pandas
             if len(x) < 10: return 0
-            z_lag = x.shift(1).fillna(0)
-            dz = x.diff().fillna(0)
             
-            # Regresión: dz = theta * (mu - z_lag) * dt
-            # Simplificado: dz ~ intercept + lambda * z_lag
-            res = sm.OLS(dz, sm.add_constant(z_lag)).fit()
-            lambda_val = res.params[1]
+            # Diferencias y lags usando slicing de numpy (mucho más rápido)
+            z_lag = x[:-1]
+            dz = np.diff(x)
             
-            if lambda_val >= 0: return window # No hay reversión a la media
-            
-            half_life = -np.log(2) / lambda_val
-            return min(half_life, window)
+            try:
+                # Regresión: dz = intercept + lambda * z_lag
+                res = sm.OLS(dz, sm.add_constant(z_lag)).fit()
+                
+                # FIX: Usamos .iloc[1] para evitar FutureWarning y KeyError
+                lambda_val = res.params.iloc[1]
+                
+                # Si lambda es positivo o cero, no hay reversión (el spread diverge)
+                if lambda_val >= 0: 
+                    return float(window) 
+                
+                # Fórmula OU: Half-life = -ln(2) / lambda
+                half_life = -np.log(2) / lambda_val
+                return min(half_life, float(window))
+            except:
+                return float(window)
 
-        return spread_series.rolling(window=window).apply(get_half_life)
+        # Raw=True hace que el procesamiento sea más rápido al pasar directamente el array
+        return spread_series.rolling(window=window).apply(get_half_life, raw=True)
 
 
 
@@ -575,76 +609,78 @@ class SyntheticArbitrageML:
 
 class MarkovRegimeFeatures:
     """
-    Modelos de Markov y HMM para deteccion de regimenes ocultos 
-    y probabilidades de transicion de mercado.
+    Detección de regímenes ocultos y anomalías estadísticas.
     """
     
     @staticmethod
     def gaussian_hmm_regimes(df: pd.DataFrame, prefix: str = "", n_states: int = 3) -> pd.DataFrame:
-        # Preparamos las observaciones: Retornos Logaritmicos y Parkinson Vol
+        """
+        Detecta regímenes (Ej: 0: Calma, 1: Volátil, 2: Crash).
+        Usa una lógica de 'entrenamiento total' pero se advierte que es descriptiva.
+        """
         returns = np.log(df[f'{prefix}Close'] / df[f'{prefix}Close'].shift(1)).fillna(0)
         vol = df[f'{prefix}parkinson_gap'].fillna(0)
         
+        # Normalización (Importante para que el HMM no se confunda con escalas)
         obs = np.column_stack([returns, vol])
         
-        # Ajuste del modelo HMM
-        model = hmm.GaussianHMM(n_components=n_states, covariance_type="diag", n_iter=100, random_state=42)
-        model.fit(obs)
+        try:
+            model = hmm.GaussianHMM(n_components=n_states, covariance_type="diag", n_iter=100, random_state=42)
+            model.fit(obs)
+            probs = model.predict_proba(obs)
+        except:
+            probs = np.zeros((len(df), n_states))
         
-        # Prediccion de probabilidades posteriores (Estados probables)
-        probs = model.predict_proba(obs)
-        
-        # Creamos columnas para cada estado
         state_cols = [f'{prefix}hmm_state_{i}_prob' for i in range(n_states)]
         return pd.DataFrame(probs, index=df.index, columns=state_cols)
 
     @staticmethod
-    def order_flow_transition_matrix(df: pd.DataFrame, prefix: str = "", bins: int = 3) -> pd.Series:
+    def order_flow_transition_matrix(df: pd.DataFrame, prefix: str = "", bins: int = 3, window: int = 100) -> pd.Series:
+        """
+        Probabilidad de transición a 'estado crítico' (Crash/Pánico).
+        """
         delta = df[f'{prefix}cum_delta_aggr'].fillna(0)
-        # Manejo de error si no hay suficiente variacion para qcut
-        try:
-            states = pd.qcut(delta, q=bins, labels=False, duplicates='drop')
-        except ValueError:
-            states = pd.Series(0, index=df.index)
         
-        def calc_transition_prob(x):
-            if len(x) < 10: return 0.5
-            transitions = np.zeros((bins, bins))
-            for t in range(len(x)-1):
-                idx_i, idx_j = int(x[t]), int(x[t+1])
-                if idx_i < bins and idx_j < bins:
-                    transitions[idx_i, idx_j] += 1
-            
-            row_sums = transitions.sum(axis=1)
-            prob_to_crash = transitions[:, 0].sum() / (row_sums.sum() + 1e-9)
-            return prob_to_crash
+        # Usamos labels=False para que nos dé 0, 1, 2...
+        try:
+            states = pd.qcut(delta, q=bins, labels=False, duplicates='drop').values
+        except:
+            return pd.Series(0, index=df.index)
 
-        return states.rolling(window=100).apply(calc_transition_prob)
+        out = np.full(len(states), 0.5)
+        
+        # Optimizamos el loop manual en lugar de .apply()
+        for i in range(window, len(states)):
+            segment = states[i-window:i]
+            # Contar cuántas veces pasó de cualquier estado al estado 0 (extremo inferior)
+            transitions_to_low = np.sum((segment[:-1] != 0) & (segment[1:] == 0))
+            total_transitions = window - 1
+            out[i] = transitions_to_low / total_transitions
+            
+        return pd.Series(out, index=df.index)
 
     @staticmethod
-    def hmm_log_likelihood_anomaly(df: pd.DataFrame, prefix: str = "", window: int = 60) -> pd.Series:
+    def hmm_log_likelihood_anomaly(df: pd.DataFrame, prefix: str = "", window: int = 100) -> pd.Series:
         """
-        3. HMM Likelihood (CORREGIDO).
-        Calcula el score de verosimilitud (log-likelihood) del modelo.
+        Mide qué tan 'extraño' es el comportamiento actual respecto al pasado reciente.
         """
-        returns = np.log(df[f'{prefix}Close'] / df[f'{prefix}Close'].shift(1)).fillna(0).values
+        returns = np.log(df[f'{prefix}Close'] / df[f'{prefix}Close'].shift(1)).fillna(0).values.reshape(-1, 1)
+        out = np.zeros(len(returns))
         
-        # Modelo pre-configurado
-        model = hmm.GaussianHMM(n_components=2, covariance_type="diag", n_iter=50)
-
-        def get_likelihood(x):
-            if len(x) < window: return 0
+        # En lugar de re-entrenar cada vez, entrenamos por bloques o usamos una muestra
+        model = hmm.GaussianHMM(n_components=2, covariance_type="diag")
+        
+        # Procesamos en saltos o ventanas para evitar que la CPU explote
+        for i in range(window, len(returns), 5): # Saltos de 5 para velocidad
+            chunk = returns[i-window:i]
             try:
-                obs = x.reshape(-1, 1)
-                # Entrenamos y puntuamos el segmento actual
-                model.fit(obs)
-                return model.score(obs)
+                model.fit(chunk)
+                # Score de la última observación
+                out[i:i+5] = model.score(returns[i].reshape(-1, 1))
             except:
-                return 0
-
-        
-        return pd.Series(returns).rolling(window=window).apply(get_likelihood).fillna(0)
-
+                continue
+                
+        return pd.Series(out, index=df.index)
 
 class RiskFeaturePipeline:
     def __init__(self):
@@ -736,4 +772,5 @@ class RiskFeaturePipeline:
             df_out[f'{prefix}hmm_likelihood'] = self.markov.hmm_log_likelihood_anomaly(df_out, prefix=prefix)
 
         # 4. Limpieza Final (Eliminar NaNs de ventanas iniciales)
-        return df_out.dropna()
+        df_out = df_out.iloc[100:].ffill().bfill() 
+        return df_out

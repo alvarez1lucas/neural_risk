@@ -1,0 +1,63 @@
+# Core Data Science
+numpy>=1.23.0
+pandas>=1.5.0
+scipy>=1.9.0
+scikit-learn>=1.2.0
+
+# Time Series & Statistics
+statsmodels>=0.13.0
+arch>=5.3.0  # GARCH
+hmmlearn>=0.2.7  # Hidden Markov Models
+pmdarima>=2.0.0  # ARIMA
+
+# Deep Learning
+torch>=2.0.0
+tensorflow>=2.11.0
+
+# Gradient Boosting
+xgboost>=1.7.0
+lightgbm>=3.3.0
+catboost>=1.2.0
+
+# Causal Inference
+causalml>=0.12.0
+econml>=0.13.0
+
+# Feature Engineering
+featuretools>=1.26.0
+tsfresh>=0.19.0
+
+# Utilities
+pytz>=2023.3
+python-dotenv>=0.21.0
+pyyaml>=6.0
+loguru>=0.7.0
+tqdm>=4.65.0
+
+# Database
+sqlalchemy>=2.0.0
+sqlite3  # Built-in
+
+# API/Exchange
+ccxt>=2.0.0
+requests>=2.28.0
+
+# Monitoring/Logging
+prometheus-client>=0.16.0
+structlog>=23.1.0
+
+# Backtest & Analysis
+backtrader>=1.9.76  # Optional, for backtesting
+pyfolio>=0.9.2  # Performance metrics
+
+# Development/Testing
+pytest>=7.0.0
+pytest-cov>=4.0.0
+black>=23.1.0
+flake8>=6.0.0
+mypy>=1.0.0
+
+# Jupyter & Notebooks
+jupyter>=1.0.0
+jupyterlab>=3.5.0
+ipywidgets>=8.0.0

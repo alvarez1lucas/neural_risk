@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+#layers.py
 class GatedLinearUnit(nn.Module):
     def __init__(self, input_size, output_size):
         super().__init__()
