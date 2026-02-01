@@ -1,4 +1,4 @@
-# 🤖 Neural Risk Engine v0.2.0
+#  Neural Risk Engine v0.2.0
 
 **Automated cryptocurrency risk management and portfolio optimization system**
 
@@ -6,7 +6,7 @@ A production-ready microservices architecture for real-time multi-asset trading 
 
 ---
 
-## 🎯 What This System Does
+##  What This System Does
 
 **Input**: Real-time market data (Binance API)  
 **Process**: 9 ensemble experts + portfolio optimization  
@@ -22,7 +22,7 @@ Market Data → Data Fetcher → Engine (9 Experts) → Executor → Live Tradin
 
 ---
 
-## 🏗️ Architecture Overview
+##  Architecture Overview
 
 ### 5-Layer Microservices
 
@@ -137,7 +137,7 @@ sqlite3 data/neural_risk.db "SELECT * FROM engine_decisions LIMIT 5;"
 
 ---
 
-## 📊 What to Expect
+##  What to Expect
 
 ### During First Hour
 - Data Fetcher: Fetches 5min candlestick every 300s ✓
@@ -162,7 +162,7 @@ config/config.yaml            -- Live configuration
 
 ---
 
-## 🔧 Key Features
+##  Key Features
 
 ✅ **Multi-Asset**: Supports 2-10+ cryptocurrencies  
 ✅ **Ensemble**: 9 diverse expert models for robust signals  
@@ -175,7 +175,7 @@ config/config.yaml            -- Live configuration
 
 ---
 
-## 📁 Project Structure
+##  Project Structure
 
 ```
 neural-risk/
@@ -207,7 +207,7 @@ neural-risk/
 
 ---
 
-## 🔑 Configuration Guide
+##  Configuration Guide
 
 ### `config/config.yaml`
 
@@ -249,7 +249,7 @@ training:
 
 ---
 
-## 🚨 Troubleshooting
+##  Troubleshooting
 
 ### Issue: "ModuleNotFoundError: No module named 'neural_risk'"
 
@@ -280,7 +280,7 @@ python -c "from neural_risk.models.ensemble_trainer import EnsembleTrainer; prin
 
 ---
 
-## 📈 Performance Targets
+##  Performance Targets
 
 After 30 days of live trading:
 - Sortino Ratio: > 1.5
@@ -291,7 +291,7 @@ After 30 days of live trading:
 
 ---
 
-## 🔄 Updating Models
+##  Updating Models
 
 Models are trained daily at 00:00 UTC using the last 180 days of data. To manually retrain:
 
@@ -302,7 +302,7 @@ python scripts/train_models.py
 
 ---
 
-## 🛠️ Development
+##  Development
 
 ### Add a New Expert Model
 
@@ -325,7 +325,7 @@ python scripts/train_models.py
 
 ---
 
-## 🤝 Support
+##  Support
 
 **For issues**:
 1. Check `logs/neural_risk.log` for error messages
@@ -340,7 +340,7 @@ Proprietary - All rights reserved
 
 ---
 
-## ✅ Quick Validation
+##  Quick Validation
 
 After deployment, run this to confirm everything works:
 
