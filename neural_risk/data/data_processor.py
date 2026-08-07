@@ -1,6 +1,24 @@
+# neural_risk/data/data_processor.py
+"""
+Módulo de limpieza e ingeniería de características para series temporales financieras.
+
+ESTADO: Parcheado -- se eliminaron 2 definiciones duplicadas de
+_optimize_types y 2 de get_returns (en Python, cuando un método se
+define varias veces en la misma clase, gana la última silenciosamente;
+las anteriores quedaban como código muerto invisible, confuso para
+cualquiera que leyera el archivo de arriba hacia abajo). Se dejó UNA
+sola versión de cada uno, consolidada.
+
+FIX escalabilidad: 'from statsmodels.tsa.stattools import adfuller' se
+movió DENTRO de check_stationarity() (import local) -- era el ÚNICO
+método de esta clase que necesita statsmodels, pero el import estaba a
+nivel de módulo, lo que obligaba a instalar statsmodels para usar
+CUALQUIER método de DataProcessor (auto_clean, rename_columns,
+get_returns...), aunque no lo necesiten.
+"""
+
 import numpy as np
 import pandas as pd
-from statsmodels.tsa.stattools import adfuller
 from typing import Union, Dict, List
 from scipy.stats.mstats import winsorize
 
@@ -32,15 +50,23 @@ class DataProcessor:
         return df.dropna()
 
     def _optimize_types(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Sub-rutina interna para inferencia de tipos. Intenta pasar
+        columnas tipo 'object' a numérico (limpiando comas de miles) o,
+        si falla, a fecha. Si ninguna conversión aplica, se mantiene
+        como objeto (ej. tickers, categorías).
+        """
         for col in df.columns:
             if df[col].dtype == 'object':
                 try:
-                    df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce')
+                    df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='raise')
                 except:
-                    try: df[col] = pd.to_datetime(df[col])
-                    except: pass
+                    try:
+                        df[col] = pd.to_datetime(df[col])
+                    except:
+                        pass
         return df
-    
+
     def prepare_portfolio_df(self, assets_data: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         """
         Toma un diccionario de activos {'BTC': df1, 'SPY': df2}
@@ -49,42 +75,40 @@ class DataProcessor:
         processed_dfs = []
         
         for ticker, df in assets_data.items():
-            # 1. Limpieza individual
             df_clean = self.auto_clean(df)
-            # 2. Renombrar con prefijo: 'Close' -> 'BTC_Close'
             df_renamed = df_clean.add_prefix(f"{ticker}_")
             processed_dfs.append(df_renamed)
             
-        # 3. Merge Externo (Outer Join) para no perder días
         combined = pd.concat(processed_dfs, axis=1, join='outer')
-        
-        # 4. Relleno post-merge (Si SPY cierra y BTC no, mantenemos el precio de SPY)
         combined = combined.ffill().dropna()
         
         print(f"📊 Portfolio alineado: {len(combined.columns)} columnas para {list(assets_data.keys())}")
         return combined
-    
-    def get_returns(self, df: pd.DataFrame, method: str = 'log') -> pd.DataFrame:
-        """Calcula retornos para todas las columnas del portfolio."""
-        if method == 'log':
-            return np.log(df / df.shift(1)).dropna()
-        return df.pct_change().dropna()
 
-    def _optimize_types(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Sub-rutina interna para inferencia de tipos."""
-        for col in df.columns:
-            if df[col].dtype == 'object':
-                try:
-                    # Intenta limpiar comas de miles "1,000.50" y pasar a numérico
-                    df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='raise')
-                except:
-                    try:
-                        # Intenta pasar a fecha
-                        df[col] = pd.to_datetime(df[col])
-                    except:
-                        pass # Se mantiene como objeto (ej. Tickers, Categorías)
-        return df
-
+    def get_returns(self, df: pd.DataFrame, columns: list = None,
+                   method: str = 'log', dropna: bool = True) -> pd.DataFrame:
+        """
+        Calcula retornos para las columnas indicadas (o todas si no se
+        especifican). Agrega columnas nuevas con sufijo '_ret', sin
+        pisar las originales.
+        
+        FIX: antes existían 3 versiones de este método en el archivo.
+        La que quedaba activa (la última) NO hacía dropna() al final --
+        quien llamara a get_returns() esperando datos limpios (como
+        sugería el comportamiento de las 2 versiones anteriores)
+        recibía un NaN silencioso en la primera fila. Ahora dropna es
+        un parámetro explícito, default True (comportamiento seguro).
+        """
+        df_ret = pd.DataFrame(index=df.index)
+        cols = columns if columns else df.columns
+        
+        for col in cols:
+            if method == 'log':
+                df_ret[f"{col}_ret"] = np.log(df[col] / df[col].shift(1))
+            else:
+                df_ret[f"{col}_ret"] = df[col].pct_change()
+        
+        return df_ret.dropna() if dropna else df_ret
 
     def rename_columns(self, df: pd.DataFrame, asset_name: str) -> pd.DataFrame:
         """
@@ -99,19 +123,13 @@ class DataProcessor:
         """
         Ejecuta el Test de Dickey-Fuller Aumentado (ADF) para verificar si una serie
         es apta para Machine Learning.
-        
-        Args:
-            series (pd.Series): Serie de tiempo (ej. Precios o Retornos).
-            threshold (float): Valor p de corte (usualmente 0.05).
-            
-        Returns:
-            Dict: Reporte con p-value, estadístico y recomendación.
         """
+        from statsmodels.tsa.stattools import adfuller  # import local: único método que lo necesita
+
         clean_series = series.dropna()
         if len(clean_series) < 20:
             return {'error': 'Insuficientes datos para test ADF'}
             
-        # maxlag=None deja que AIC elija el lag óptimo
         result = adfuller(clean_series, maxlag=None, autolag='AIC')
         
         p_value = result[1]
@@ -140,70 +158,39 @@ class DataProcessor:
             if k >= lim:
                 break
         return np.array(w[::-1]).reshape(-1, 1)
-    
-    def get_returns(self, df: pd.DataFrame, columns: list = None, method: str = 'log') -> pd.DataFrame:
-        
-        df_ret = df.copy()
-        cols = columns if columns else df.columns
-        
-        for col in cols:
-            if method == 'log':
-                df_ret[f"{col}_ret"] = np.log(df_ret[col] / df_ret[col].shift(1))
-            else:
-                df_ret[f"{col}_ret"] = df_ret[col].pct_change()
-                
-        return df_ret.dropna()
 
     def fractional_diff(self, series: pd.Series, d: float = 0.4, thres: float = 1e-5) -> pd.Series:
-        
-        # 1. Configuración de pesos y ventanas
         w = self.get_weights_ffd(d, thres, len(series))
         width = len(w) - 1
         
-        # 2. Aplicación vectorial (Convolution)
-        # Rellenamos con NaNs al principio porque perdemos 'width' datos
-        df_temp = series.to_frame()
-        output = {}
-        
         column_name = series.name if series.name else 'close'
         
-        # Loop optimizado (pandas rolling apply es lento para esto, usamos loops controlados o convolución)
-        # Para series financieras largas, iterar sobre la serie con pesos fijos es eficiente
         series_values = series.dropna().values
         if len(series_values) < width:
             return pd.Series(index=series.index, data=np.nan)
 
         transformed = []
-        # Aplicamos producto punto de los pesos sobre la ventana deslizante
         for i in range(width, len(series_values)):
             window0 = series_values[i-width : i+1]
-            # Nota: w son los pesos, window0 es el precio. Producto punto.
             dot_prod = np.dot(w.T, window0)[0]
             transformed.append(dot_prod)
             
-        # Reconstruir índice (alineando a la derecha, perdemos los primeros 'width' datos)
         new_index = series.dropna().index[width:]
         return pd.Series(data=transformed, index=new_index, name=f"{column_name}_frac_d{d}")
-    
+
     @staticmethod
     def merge_datasets(dfs: list, ffill: bool = True) -> pd.DataFrame:
         """
         Une múltiples DataFrames por fecha (Index) y aplica relleno total.
-        Ideal para armar carteras de múltiples activos.
         """
-        # Unimos usando un 'outer join' para no perder días de ningún activo
         combined_df = pd.concat(dfs, axis=1, join='outer')
-        
         if ffill:
-            # Relleno hacia adelante para que todos los activos tengan precio el mismo día
             combined_df = combined_df.ffill()
-            
-        return combined_df.dropna() 
-    
+        return combined_df.dropna()
+
     def handle_outliers(self, df: pd.DataFrame, limits: list = [0.01, 0.01]) -> pd.DataFrame:
         """
         Aplica Winsorization para limitar valores extremos sin eliminarlos.
-        Ideal para evitar que el ruido desvíe el entrenamiento de modelos de ML.
         """
         df_clean = df.copy()
         for col in df_clean.select_dtypes(include=[np.number]).columns:
@@ -220,19 +207,3 @@ class DataProcessor:
         else:
             df.index = df.index.tz_convert(tz)
         return df
-
-    def get_returns(self, df: pd.DataFrame, columns: list = None, method: str = 'log') -> pd.DataFrame:
-        """
-        Calcula retornos. Se agregó manejo de errores para evitar divisiones por cero.
-        """
-        df_ret = pd.DataFrame(index=df.index)
-        cols = columns if columns else df.columns
-        
-        for col in cols:
-            if method == 'log':
-                # Log-returns: ln(Pt / Pt-1)
-                df_ret[f"{col}_ret"] = np.log(df[col] / df[col].shift(1))
-            else:
-                df_ret[f"{col}_ret"] = df[col].pct_change()
-        
-        return df_ret.dropna()

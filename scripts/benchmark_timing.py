@@ -15,8 +15,6 @@ from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from neural_risk.data.data_processor import DataProcessor
-from neural_risk.models.classic import ClassicStrategy
-from neural_risk.models.ml import MLStrategy
 
 class TimingBenchmark:
     def __init__(self, assets=None, verbose=True):
