@@ -1,0 +1,17 @@
+# config/model_schedule.yaml
+# Configuración dinámica de reentrenamiento por tier. Editable sin tocar
+# código -- train_models.py la relee en cada chequeo de ciclo.
+model_schedule:
+  fast_tier:
+    # Modelos baratos/deterministas (árboles, estadística clásica).
+    # No usan backprop/epochs -> reentrenar es rápido.
+    retrain_interval_days: 1
+    experts: [HMM, XGB, CAUSAL, GARCH, ANOMALY_IFOREST]
+
+  slow_tier:
+    # Modelos neuronales (backprop/epochs) -> caros de reentrenar.
+    # NOTA: "pesado" acá se define por tipo de algoritmo, no por el
+    # tamaño de ventana temporal que miran (eso es un concepto distinto,
+    # ver window_sizes en config.yaml).
+    retrain_interval_days: 5
+    experts: [ENSEMBLE_TRAINER, LSTM_TF, ANOMALY_AUTOENCODER]

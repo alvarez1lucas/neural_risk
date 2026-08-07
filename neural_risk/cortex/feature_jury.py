@@ -28,7 +28,7 @@ class FeatureJury:
         X = df_clean.loc[common_idx]
         y = target.loc[common_idx]
 
-        print(f"⚖️ Iniciando Juicio para {len(X.columns)} features...")
+        print(f"[JURY] Iniciando Juicio para {len(X.columns)} features...")
 
         # 1. Juez de Causalidad Temporal (Granger)
         granger_approved = self._run_granger(X, y)
@@ -51,7 +51,7 @@ class FeatureJury:
         # Consenso: Al menos 2 de 3 jueces deben aprobar la feature
         final_features = [f for f, v in votes.items() if v >= 2]
         
-        print(f"✅ Veredicto: {len(final_features)} features aprobadas por mayoría.")
+        print(f"[VERDICT] {len(final_features)} features aprobadas por mayoría.")
         return final_features
 
     def _run_granger(self, X, y):

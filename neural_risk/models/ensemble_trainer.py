@@ -2,6 +2,8 @@
 """
 Ensemble Training Module: Combina Neural + XGBoost + Kalman Filter
 Para Paso 4 mejorado del engine.
+
+ESTADO: Parcheado (ver comentario FIX en train_ensemble).
 """
 
 import torch
@@ -22,8 +24,6 @@ class KalmanFilterRegime:
     Mantiene estado oculto de volatilidad y drift.
     """
     def __init__(self, q=1e-4, r=0.1):
-        # q: proceso de ruido (pequeño = suavizado)
-        # r: ruido de medición (pequeño = confiable)
         self.q = q
         self.r = r
         self.x = 0  # Estado: volatilidad implícita
@@ -35,12 +35,10 @@ class KalmanFilterRegime:
         z: observación (volatilidad realizada)
         Retorna: estado filtrado y ganancia de Kalman
         """
-        # Predicción
         x_pred = self.x
         p_pred = self.p + self.q
         
-        # Actualización
-        k = p_pred / (p_pred + self.r)  # Ganancia de Kalman
+        k = p_pred / (p_pred + self.r)
         self.x = x_pred + k * (z - x_pred)
         self.p = (1 - k) * p_pred
         
@@ -72,7 +70,6 @@ class EnsembleTrainer:
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.neural_model = neural_model.to(self.device)
         
-        # XGBoost model
         self.xgb_model = xgb.XGBRegressor(
             n_estimators=100,
             max_depth=6,
@@ -80,10 +77,8 @@ class EnsembleTrainer:
             random_state=42
         )
         
-        # Kalman filter para regime detection
         self.kalman = KalmanFilterRegime(q=1e-4, r=0.1)
         
-        # Optimizer y loss
         self.optimizer = torch.optim.Adam(
             self.neural_model.parameters(), 
             lr=lr, 
@@ -92,7 +87,6 @@ class EnsembleTrainer:
         self.criterion = nn.GaussianNLLLoss()
         self.scaler = RobustScaler()
         
-        # Historial de pesos
         self.weight_history = []
     
     def create_sequences(self, df, target, window_size=10):
@@ -104,21 +98,16 @@ class EnsembleTrainer:
         return torch.FloatTensor(np.array(X)), torch.FloatTensor(np.array(y))
     
     def prepare_data(self, df_features, target, train_split=0.8, window_size=10):
-        """
-        Preparación MEJORADA con temporal CV y regime detection
-        """
+        """Preparación con temporal CV y regime detection"""
         df_numeric = df_features.select_dtypes(include=[np.number]).fillna(0)
         
-        # Split temporal (crucial)
         split_idx = int(len(df_numeric) * train_split)
         train_df = df_numeric.iloc[:split_idx]
         test_df = df_numeric.iloc[split_idx:]
         
-        # Escalamiento
         scaled_train = self.scaler.fit_transform(train_df)
         scaled_test = self.scaler.transform(test_df)
         
-        # Crear secuencias
         X_train, y_train = self.create_sequences(
             pd.DataFrame(scaled_train), 
             target.iloc[:split_idx],
@@ -130,7 +119,6 @@ class EnsembleTrainer:
             window_size
         )
         
-        # DataLoaders
         train_loader = DataLoader(
             TensorDataset(X_train, y_train), 
             batch_size=32, 
@@ -142,7 +130,6 @@ class EnsembleTrainer:
             shuffle=False
         )
         
-        # Datos planos para XGBoost
         return {
             'neural': (train_loader, test_loader),
             'xgb_X_train': scaled_train,
@@ -195,21 +182,26 @@ class EnsembleTrainer:
                     X_batch = X_batch.to(self.device)
                     y_batch = y_batch.to(self.device)
                     
-                    # Neural prediction
                     mu, sigma, _ = self.neural_model(X_batch)
                     neural_loss = self.criterion(mu.squeeze(), y_batch, sigma.squeeze())
                     val_loss_ensemble += neural_loss.item()
                     neural_preds.append(mu.cpu().numpy())
             
-            # XGBoost predictions en test
             xgb_pred = self.xgb_model.predict(xgb_data['xgb_X_test'])
             
-            # Detectar regime
+            # FIX: 'returns_realized' ya se calculaba acá, pero antes
+            # nunca se le pasaba al Kalman -- self.kalman.update() no se
+            # llamaba en ningún lado del archivo. Resultado: self.history
+            # quedaba vacío para siempre, y get_regime() devolvía 'MID'
+            # siempre, sin importar la volatilidad real observada.
+            # Ahora se alimenta el filtro con la volatilidad realizada de
+            # este epoch ANTES de preguntar el régimen, así el filtro
+            # tiene con qué adaptarse.
             returns_realized = np.std(xgb_data['y_test'])
+            self.kalman.update(returns_realized)
             regime = self.kalman.get_regime()
             weights = regime_weights[regime]
             
-            # Guardar pesos
             self.weight_history.append({'epoch': epoch, 'regime': regime, 'weights': weights})
             
             avg_loss = (train_loss_neural / len(train_loader)) if len(train_loader) > 0 else 0
@@ -217,7 +209,6 @@ class EnsembleTrainer:
             if verbose and (epoch + 1) % 10 == 0:
                 print(f"  Epoch {epoch+1}/{epochs} | Loss: {avg_loss:.4f} | Regime: {regime} | Weights: {weights}")
             
-            # Early stopping
             if avg_loss < best_loss:
                 best_loss = avg_loss
                 patience_counter = 0
@@ -234,23 +225,18 @@ class EnsembleTrainer:
         )
     
     def _get_ensemble_predictions(self, neural_preds, xgb_pred, weights):
-        """
-        Combina predicciones de los 3 modelos con pesos dinámicos.
-        """
+        """Combina predicciones de los 3 modelos con pesos dinámicos."""
         neural_mean = np.concatenate(neural_preds).mean()
         xgb_mean = xgb_pred.mean()
         
-        # Baseline simple (media histórica)
         baseline = (neural_mean + xgb_mean) / 2
         
-        # Ensemble ponderado
         ensemble_pred = (
             weights[0] * neural_mean +
             weights[1] * xgb_mean +
             weights[2] * baseline
         )
         
-        # Incertidumbre estimada
         neural_std = np.concatenate(neural_preds).std() if neural_preds else 0.1
         xgb_std = np.std(xgb_pred) if len(xgb_pred) > 1 else 0.1
         ensemble_std = np.sqrt(
@@ -264,8 +250,17 @@ class EnsembleTrainer:
     def predict_ensemble(self, X_test, y_test=None):
         """
         Predicción en datos nuevos usando ensemble.
+        
+        NOTA: si se pasa y_test (observación real disponible en el
+        momento de predecir), lo ideal sería también actualizar el
+        Kalman acá con la volatilidad realizada más reciente antes de
+        leer el régimen -- hoy este método solo LEE el régimen
+        (get_regime()) que quedó fijado al final de train_ensemble().
+        No lo agrego en este patch para no cambiar el comportamiento de
+        predict_ensemble() sin que lo pidas explícitamente, pero queda
+        marcado como posible mejora si notás que el régimen se
+        'congela' entre reentrenamientos.
         """
-        # Neural
         self.neural_model.eval()
         with torch.no_grad():
             X_tensor = torch.FloatTensor(X_test).to(self.device)
@@ -273,14 +268,11 @@ class EnsembleTrainer:
             neural_pred = mu.squeeze().cpu().item()
             neural_std = sigma.squeeze().cpu().item()
         
-        # XGBoost
         xgb_pred = self.xgb_model.predict(X_test.reshape(1, -1))[0]
         
-        # Kalman update (si tenemos observación real)
         regime = self.kalman.get_regime()
         weights = {'LOW': [0.5, 0.3, 0.2], 'MID': [0.6, 0.25, 0.15], 'HIGH': [0.7, 0.2, 0.1]}[regime]
         
-        # Ensemble final
         baseline = (neural_pred + xgb_pred) / 2
         ensemble_pred = (
             weights[0] * neural_pred +

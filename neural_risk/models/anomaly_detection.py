@@ -2,6 +2,8 @@
 """
 Isolation Forest & Autoencoders para Anomaly Detection
 Detecta outliers en cripto (rug pulls, flash crashes)
+
+ESTADO: Parcheado (ver comentario FIX en predict_anomalies).
 """
 
 import numpy as np
@@ -27,7 +29,6 @@ class AnomalyDetectionAutoencoder(nn.Module):
         self.input_dim = input_dim
         self.encoding_dim = encoding_dim
         
-        # Encoder
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, 32),
             nn.ReLU(),
@@ -37,7 +38,6 @@ class AnomalyDetectionAutoencoder(nn.Module):
             nn.ReLU()
         )
         
-        # Decoder
         self.decoder = nn.Sequential(
             nn.Linear(encoding_dim, 16),
             nn.ReLU(),
@@ -58,27 +58,14 @@ class AnomalyDetectionAutoencoder(nn.Module):
 class AnomalyDetector:
     """
     Expert en Anomaly Detection.
-    Usa Isolation Forest + Autoencoder.
-    
-    Pros:
-    - Detecta rug pulls, flash crashes
-    - Safety layer antes de signals
-    - Robusto a outliers extremos
-    
-    Cons:
-    - Falsos positivos en vol normal
-    - No genera estrategias puras
-    
-    Para Crypto:
-    - Post-jury: si anomaly detectada → signal=0
-    - Dinámico: agente ignora signals temporalmente
-    - Ventanas de 10/30/100 períodos
+    Usa Isolation Forest (sobre retornos, univariado) + Autoencoder
+    (sobre features completas, multivariado). Son dos detectores
+    COMPLEMENTARIOS que miran cosas distintas -- por eso fit/predict
+    de cada uno deben recibir consistentemente el mismo tipo de input
+    que se usó para entrenarlos (ver FIX en predict_anomalies).
     """
     
     def __init__(self, contamination: float = 0.05, device=None):
-        """
-        contamination: % de anomalías esperadas
-        """
         self.contamination = contamination
         self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
@@ -97,7 +84,13 @@ class AnomalyDetector:
         self.scores_history = []
         
     def fit_isolation_forest(self, X: np.ndarray) -> None:
-        """Entrena Isolation Forest"""
+        """
+        Entrena Isolation Forest.
+        
+        Se fitea SIEMPRE sobre datos univariados (retornos): X entra
+        como array 1D y se reshapea a [-1, 1]. predict_anomalies() debe
+        respetar esa misma forma al predecir (ver FIX ahí).
+        """
         X_clean = np.array(X).reshape(-1, 1) if X.ndim == 1 else np.array(X)
         X_clean = np.nan_to_num(X_clean, nan=0)
         
@@ -105,7 +98,7 @@ class AnomalyDetector:
     
     def fit_autoencoder(self, X: pd.DataFrame, epochs: int = 20, 
                         batch_size: int = 32, lr: float = 1e-3) -> None:
-        """Entrena Autoencoder"""
+        """Entrena Autoencoder sobre el set completo de features (multivariado)."""
         X_clean = X.fillna(0).values
         X_scaled = self.scaler.fit_transform(X_clean)
         
@@ -117,61 +110,75 @@ class AnomalyDetector:
         self.ae_optimizer = torch.optim.Adam(self.autoencoder.parameters(), lr=lr)
         criterion = nn.MSELoss()
         
-        # Training loop
         X_tensor = torch.FloatTensor(X_scaled).to(self.device)
         
         for epoch in range(epochs):
             for i in range(0, len(X_tensor), batch_size):
                 batch = X_tensor[i:i+batch_size]
                 
-                # Forward
                 reconstructed = self.autoencoder(batch)
                 loss = criterion(reconstructed, batch)
                 
-                # Backward
                 self.ae_optimizer.zero_grad()
                 loss.backward()
                 self.ae_optimizer.step()
         
-        # Calcula reconstruction error threshold (95 percentil)
         with torch.no_grad():
             X_reconstructed = self.autoencoder(X_tensor)
             errors = torch.mean((X_tensor - X_reconstructed) ** 2, dim=1)
         
-        self.reconstruction_threshold = np.percentile(
-            errors.cpu().numpy(),
-            95
-        )
+        self.reconstruction_threshold = np.percentile(errors.cpu().numpy(), 95)
     
-    def predict_anomalies(self, X: pd.DataFrame) -> Dict:
+    def predict_anomalies(self, X: pd.DataFrame, 
+                         recent_returns: Optional[np.ndarray] = None) -> Dict:
         """
         Detecta anomalías usando ambos métodos.
         
-        Returns:
-            {
-                'anomaly_detected': bool,
-                'isolation_forest_score': float,
-                'autoencoder_score': float,
-                'combined_score': float,
-                'anomaly_type': str,
-                'confidence': float,
-                'recommendation': str
-            }
+        FIX: antes este método recibía UN solo argumento (X, el
+        DataFrame multi-feature con todas las columnas que aprobó el
+        jurado) y se lo pasaba directo a isolation_forest.predict(X).
+        Pero fit_isolation_forest() se entrena con 'returns' -- un array
+        1D reshapeado a 1 SOLA columna. Mismatch de dimensiones
+        (ej. modelo entrenado con 1 feature, se le pide predecir con 15)
+        -> sklearn tira ValueError EN TODOS LOS CICLOS, atrapado
+        silenciosamente por el try/except de engine.py, dejando
+        anomaly_detected=False siempre -- el "safety layer" nunca
+        disparaba, sin que nada lo reportara como roto.
+        
+        Ahora el método recibe explícitamente los dos inputs que cada
+        submodelo necesita, en el MISMO espacio en que cada uno se
+        entrenó:
+        - recent_returns: univariado, para Isolation Forest.
+        - X: multivariado (features completas), para el Autoencoder.
+        
+        Args:
+            X: DataFrame de features (mismo que se usó en fit_autoencoder)
+            recent_returns: array de retornos recientes (mismo que se
+                usó en fit_isolation_forest). Si no se pasa, cae a un
+                fallback defensivo (ver abajo) que NO es tan confiable
+                como pasarlo explícitamente -- se recomienda siempre
+                pasar recent_returns.
         """
+        if recent_returns is None:
+            # Fallback defensivo: si no se pasa el array de retornos,
+            # se aproxima con la primera columna numérica de X. Esto NO
+            # es lo ideal (puede no ser semánticamente "retornos"), pero
+            # evita un crash duro si algún caller viejo todavía no pasa
+            # el segundo argumento.
+            recent_returns = X.select_dtypes(include=[np.number]).iloc[:, 0].values
+        
+        returns_clean = np.array(recent_returns).flatten().reshape(-1, 1)
+        returns_clean = np.nan_to_num(returns_clean, nan=0.0)
+        
+        # 1. Isolation Forest (univariado, sobre retornos)
+        if_pred = self.isolation_forest.predict(returns_clean)
+        if_scores = self.isolation_forest.score_samples(returns_clean)
+        
+        if_anomaly = bool(if_pred[-1] == -1)
+        if_score = float(if_scores[-1]) if len(if_scores) > 0 else 0.0
+        
+        # 2. Autoencoder (multivariado, sobre features completas)
         X_clean = X.fillna(0).values
-        
-        # 1. Isolation Forest
-        if len(X_clean.shape) == 1:
-            X_clean = X_clean.reshape(-1, 1)
-        
-        if_pred = self.isolation_forest.predict(X_clean)
-        if_scores = self.isolation_forest.score_samples(X_clean)
-        
-        # -1 = anomaly, 1 = normal
-        if_anomaly = if_pred[-1] == -1
-        if_score = float(if_scores[-1]) if len(if_scores) > 0 else 0
-        
-        # 2. Autoencoder
         ae_anomaly = False
         ae_score = 0.0
         
@@ -183,8 +190,7 @@ class AnomalyDetector:
                 with torch.no_grad():
                     X_reconstructed = self.autoencoder(X_tensor)
                     reconstruction_error = torch.mean(
-                        (X_tensor - X_reconstructed) ** 2,
-                        dim=1
+                        (X_tensor - X_reconstructed) ** 2, dim=1
                     )
                 
                 ae_score = float(reconstruction_error[-1].cpu().numpy())
@@ -195,7 +201,6 @@ class AnomalyDetector:
         # 3. Combinado
         combined_anomaly = if_anomaly or ae_anomaly
         
-        # Confidence: si ambos métodos acuerdan
         if if_anomaly and ae_anomaly:
             confidence = 0.95
         elif if_anomaly or ae_anomaly:
@@ -203,10 +208,13 @@ class AnomalyDetector:
         else:
             confidence = 0.05
         
-        # Detectar tipo de anomalía
-        anomaly_type = self._classify_anomaly(X_clean[-1])
+        # FIX: antes se clasificaba con X_clean[-1] (el último valor de
+        # una feature arbitraria del DataFrame, no necesariamente un
+        # retorno). Los thresholds de _classify_anomaly (3-sigma, -0.2,
+        # 0.2) están pensados para retornos, así que ahora se clasifica
+        # con el propio array de retornos.
+        anomaly_type = self._classify_anomaly(returns_clean.flatten())
         
-        # Recomendación
         if combined_anomaly and confidence > 0.7:
             recommendation = 'IGNORE_SIGNALS_IMMEDIATELY'
         elif combined_anomaly:
@@ -214,17 +222,13 @@ class AnomalyDetector:
         else:
             recommendation = 'NORMAL_OPERATIONS'
         
-        # Log
         self.anomaly_history.append({
             'timestamp': pd.Timestamp.now(),
             'detected': combined_anomaly,
             'confidence': confidence,
             'type': anomaly_type
         })
-        self.scores_history.append({
-            'if_score': if_score,
-            'ae_score': ae_score
-        })
+        self.scores_history.append({'if_score': if_score, 'ae_score': ae_score})
         
         return {
             'anomaly_detected': combined_anomaly,
@@ -239,20 +243,19 @@ class AnomalyDetector:
         }
     
     def _classify_anomaly(self, data_point: np.ndarray) -> str:
-        """Clasifica tipo de anomalía detectada"""
+        """Clasifica tipo de anomalía detectada (espera valores tipo retorno)."""
         if len(data_point) == 0:
             return 'UNKNOWN'
         
-        # Heurística simple
-        last_val = data_point[-1] if isinstance(data_point, np.ndarray) else data_point
+        last_val = data_point[-1]
         
         if np.isnan(last_val) or np.isinf(last_val):
             return 'DATA_ERROR'
-        elif abs(last_val) > 3.0:  # 3-sigma
+        elif abs(last_val) > 3.0:
             return 'EXTREME_MOVEMENT'
-        elif last_val < -0.2:  # Caída fuerte
+        elif last_val < -0.2:
             return 'FLASH_CRASH'
-        elif last_val > 0.2:  # Spike fuerte
+        elif last_val > 0.2:
             return 'FLASH_SURGE'
         else:
             return 'MICRO_ANOMALY'
@@ -275,7 +278,6 @@ class AnomalyDetector:
             atype = a['type']
             anomaly_types[atype] = anomaly_types.get(atype, 0) + 1
         
-        # Trend: ¿más anomalías últimamente?
         recent = self.anomaly_history[-20:] if len(self.anomaly_history) > 20 else self.anomaly_history
         recent_rate = sum(1 for a in recent if a['detected']) / len(recent)
         
@@ -291,34 +293,19 @@ class AnomalyDetector:
 
 
 class DynamicAnomalyThreshold:
-    """
-    Umbral de anomalía dinámico que se adapta a cambios de régimen.
-    """
+    """Umbral de anomalía dinámico que se adapta a cambios de régimen."""
     
     def __init__(self, window_size: int = 100, sensitivity: float = 2.0):
-        """
-        window_size: datos para calcular baseline
-        sensitivity: cuántos sigma para considerar anomalía
-        """
         self.window_size = window_size
         self.sensitivity = sensitivity
         self.baseline_mean = 0.0
         self.baseline_std = 1.0
         
     def update(self, X: np.ndarray) -> Tuple[float, float, float]:
-        """
-        Actualiza baseline dinámicamente.
-        
-        Returns:
-            threshold, baseline_mean, baseline_std
-        """
         X_clean = np.array(X).flatten()
         X_clean = X_clean[~np.isnan(X_clean)]
         
-        if len(X_clean) < self.window_size:
-            window = X_clean
-        else:
-            window = X_clean[-self.window_size:]
+        window = X_clean if len(X_clean) < self.window_size else X_clean[-self.window_size:]
         
         self.baseline_mean = np.mean(window)
         self.baseline_std = np.std(window)
@@ -328,8 +315,6 @@ class DynamicAnomalyThreshold:
         return threshold, self.baseline_mean, self.baseline_std
     
     def is_anomaly(self, value: float, threshold: Optional[float] = None) -> bool:
-        """Verifica si valor es anomalía"""
         if threshold is None:
             threshold = self.baseline_mean + self.sensitivity * self.baseline_std
-        
         return abs(value - self.baseline_mean) > threshold

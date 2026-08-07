@@ -1,0 +1,65 @@
+# ============================================================
+# Neural Risk Engine - requirements.txt
+# Verificado contra los imports REALES del codigo (grep -r), no a ojo.
+# ============================================================
+
+# --- Core (el proyecto no arranca sin esto) ---
+numpy>=1.23.0
+pandas>=1.5.0
+scipy>=1.9.0
+scikit-learn>=1.2.0
+PyYAML>=6.0
+
+# --- Time Series & Statistics (usadas por feature_engineering.py, data_processor.py) ---
+statsmodels>=0.13.0
+arch>=5.3.0          # GARCH (garch_volatility.py)
+hmmlearn>=0.2.7       # HMM (hmm_model.py, feature_engineering.py)
+
+# --- Deep Learning (ensemble_trainer, lstm_transformer, anomaly_detection, risk_model) ---
+torch>=2.0.0
+# NOTA: tensorflow NO se usa en ningun lado del codigo -- todo lo neuronal
+# esta en PyTorch. No hace falta instalarlo (evita ademas posibles
+# conflictos de CUDA entre torch y tensorflow coexistiendo).
+
+# --- Gradient Boosting (classic.py, causal_strategy.py) ---
+xgboost>=1.7.0
+# NOTA: lightgbm y catboost NO se usan -- solo XGBoost esta conectado.
+
+# --- Conectores de datos reales (loaders.py, run_data_fetcher.py con use_mock=false) ---
+ccxt>=2.0.0
+yfinance>=0.2.0
+requests>=2.28.0     # dependencia interna de ccxt/yfinance
+
+# ============================================================
+# OPCIONALES -- alcance futuro de la libreria (RL/Copula), NO
+# conectados al engine activo hoy. Sin esto instalado, el resto del
+# sistema funciona igual -- solo fallan si intentas instanciar
+# RLAllocationExpert o CopulaExpert directamente.
+# ============================================================
+# stable-baselines3>=2.0.0   # RLAllocationExpert (models/reinforcement_learning.py)
+# copulae>=0.7.0             # CopulaExpert (models/copula_expert.py)
+
+# ============================================================
+# NO SE USAN EN NINGUN LADO DEL CODIGO (verificado con grep) --
+# de tu lista anterior, no hace falta instalar estas:
+#   tensorflow, lightgbm, catboost, causalml, econml,
+#   featuretools, tsfresh, pmdarima, backtrader, pyfolio,
+#   prometheus-client, structlog
+# Si en el futuro conectamos algo que las necesite, se agregan ahi.
+# ============================================================
+
+# ============================================================
+# DEV TOOLING (opcional, no lo usa el motor -- para tu flujo de trabajo)
+# ============================================================
+# pytest>=7.0.0
+# pytest-cov>=4.0.0
+# black>=23.1.0
+# flake8>=6.0.0
+# mypy>=1.0.0
+# python-dotenv>=0.21.0
+# loguru>=0.7.0
+# tqdm>=4.65.0
+# jupyter>=1.0.0
+# jupyterlab>=3.5.0
+# ipywidgets>=8.0.0
+# sqlalchemy>=2.0.0

@@ -140,10 +140,23 @@ class StrategyRouter:
         f* = mu / sigma^2
         
         Limitamos el apalancamiento para evitar 'Ruina del Apostador'.
+        
+        FIX: la versión anterior calculaba
+            abs(kelly) * np.sign(mu)
+        antes del max(), lo cual reintroduce el signo de mu DESPUÉS de
+        tomar el valor absoluto. Resultado: para cualquier mu < 0
+        (justamente el caso MEAN_REVERSION, que espera mu < 0), el
+        producto siempre daba negativo, y max(negativo, 0.05) colapsaba
+        SIEMPRE al piso de 0.05 sin importar la magnitud real de la señal.
+        Toda la información de tamaño se perdía en el caso más usado.
+        
+        Esta función solo debe devolver la MAGNITUD del sizing (0.05 a 2.0).
+        El signo de la operación (LONG vs SHORT/mean-reversion) ya lo
+        decide allocate_capital() según en qué branch (Caso A/B/C) cae la
+        señal — no es responsabilidad de este método reintroducirlo.
         """
         kelly = mu / (sigma**2 + 1e-6)
-        # Cap máximo de 2x, mínimo de 0.05x
-        kelly_capped = min(max(abs(kelly) * np.sign(mu), 0.05), 2.0)
+        kelly_capped = min(max(abs(kelly), 0.05), 2.0)
         return kelly_capped
 
     def get_strategy_report(self, last_n: int = 10) -> pd.DataFrame:

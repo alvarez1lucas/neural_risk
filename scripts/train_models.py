@@ -1,255 +1,192 @@
 # scripts/train_models.py
 """
-LAYER 2: MODEL TRAINING (Offline, cron job @ 00:00 UTC)
-Ejecutar 1x/día: python scripts/train_models.py
-
-Responsabilidades:
-- Cargar histórico completo (últimos 6 meses)
-- Entrenar 9 expertos en paralelo
-- Guardar modelos en pickle cache
-- run_engine.py reutiliza sin reentrenar
+LAYER 2: MODEL TRAINING (Offline, scheduling dinamico por tier)
+ESTADO: reescrito completo. Usa el mismo pipeline real que engine.py.
 """
 
 import os
-import sys
+import time
 import pickle
 import logging
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor
+from typing import Dict
 import pandas as pd
 import numpy as np
 import yaml
 import sqlite3
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - [TRAIN] - %(levelname)s - %(message)s'
-)
+from _pathutils import resolve_path
+
+from neural_risk.engine import AutomatedRiskEngine
+from neural_risk.data.data_processor import DataProcessor
+from neural_risk.data.feature_engineering import RiskFeaturePipeline
+from neural_risk.data.labeling import RiskLabeler
+from neural_risk.cortex.feature_jury import FeatureJury
+from neural_risk.agents.strategy_router import StrategyRouter
+from neural_risk.data.macro_context import MacroContextBuilder
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - [TRAIN] - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
 class ModelTrainer:
-    """Entrena todos los modelos offline"""
-    
-    def __init__(self, config_path: str = None):
-        # Si no se especifica config_path, busca desde el directorio del script
-        if config_path is None:
-            # Busca en: ./config (si corro desde raíz) o ../config (si corro desde scripts/)
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            root_dir = os.path.dirname(script_dir)
-            
-            potential_paths = [
-                os.path.join(root_dir, 'config', 'config.yaml'),  # ../config/config.yaml
-                'config/config.yaml',                               # ./config/config.yaml
-                './config/config.yaml',
-            ]
-            
-            config_path = None
-            for path in potential_paths:
-                if os.path.exists(path):
-                    config_path = path
-                    break
-            
-            if config_path is None:
-                raise FileNotFoundError(f"config.yaml not found. Tried: {potential_paths}")
-        
-        logger.info(f"Loading config from: {config_path}")
+    def __init__(self, config_path: str = "config/config.yaml",
+                 schedule_path: str = "config/model_schedule.yaml"):
+        # FIX (#3): las 4 rutas de este constructor eran relativas al
+        # CWD -- fallaban (o, peor, creaban archivos nuevos en el lugar
+        # equivocado sin avisar) si no se corria desde la raiz del
+        # proyecto. Ahora se resuelven de forma robusta.
+        config_path = resolve_path(config_path)
         with open(config_path, 'r', encoding='utf-8') as f:
             self.config = yaml.safe_load(f)
-        
-        self.db_path = self.config['database']['path']
+
+        self.schedule_path = resolve_path(schedule_path)
+        self.db_path = resolve_path(self.config['database']['path'])
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)  # FIX: garantiza que exista la carpeta antes de conectar
         self.assets = self.config['exchanges']['assets']
-        self.window_sizes = self.config['timeframes']
-        self.model_cache_path = "./data/trained_models.pkl"
-        
+        self.model_cache_path = resolve_path("./data/trained_models.pkl")
+
         os.makedirs(os.path.dirname(self.model_cache_path), exist_ok=True)
+
+        self.engine = AutomatedRiskEngine(
+            processor=DataProcessor(), pipeline=RiskFeaturePipeline(), labeler=RiskLabeler(),
+            jury=FeatureJury(), trainer_class=None,
+            router=StrategyRouter(risk_appetite=self.config.get('risk_appetite', 0.7))
+        )
+
+        # NUEVO (mejora #3 de 3): contexto macro (VIX/DXY/SPX/Oro),
+        # cacheado en disco (max_age_hours=6 por defecto -- no tiene
+        # sentido re-descargarlo en cada corrida de train_models.py).
+        # Si falla la descarga (sin internet, Yahoo caído), devuelve
+        # DataFrame vacío y el pipeline sigue funcionando sin contexto
+        # macro -- no es una dependencia dura.
+        self.macro_builder = MacroContextBuilder()
+
         logger.info(f"ModelTrainer initialized: {len(self.assets)} assets")
-    
-    def load_asset_data(self, asset: str, months: int = 6) -> pd.DataFrame:
-        """Carga últimos N meses del asset"""
-        try:
-            conn = sqlite3.connect(self.db_path)
-            
-            cutoff_date = datetime.now() - timedelta(days=30*months)
-            
-            query = '''
-                SELECT timestamp, price, volume, high, low 
-                FROM market_data 
-                WHERE asset = ? AND timestamp >= ?
-                ORDER BY timestamp ASC
-            '''
-            
-            df = pd.read_sql(query, conn, params=(asset, cutoff_date.isoformat()))
-            conn.close()
-            
-            if len(df) == 0:
-                logger.warning(f"No data for {asset}")
-                return None
-            
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
-            df = df.set_index('timestamp')
-            
-            # Calcular features
-            df['returns'] = df['price'].pct_change()
-            df['log_returns'] = np.log(df['price'] / df['price'].shift(1))
-            df['volatility'] = df['returns'].rolling(20).std()
-            df['ma_20'] = df['price'].rolling(20).mean()
-            df['ma_50'] = df['price'].rolling(50).mean()
-            df['rsi'] = self._calculate_rsi(df['price'])
-            
-            logger.info(f"Loaded {asset}: {len(df)} candles, {df.index[0].date()} to {df.index[-1].date()}")
-            
-            return df.dropna()
-        
-        except Exception as e:
-            logger.error(f"Error loading data for {asset}: {e}")
-            return None
-    
-    def _calculate_rsi(self, prices: pd.Series, period: int = 14) -> pd.Series:
-        """Calcula RSI"""
-        delta = prices.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-        
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    def train_hmm(self, df: pd.DataFrame) -> dict:
-        """Entrena HMM para detección de régimen"""
-        try:
-            from hmmlearn.hmm import GaussianHMM
-            
-            features = df[['returns', 'volatility']].dropna().values
-            
-            if len(features) < 100:
-                logger.warning("Insufficient data for HMM")
-                return None
-            
-            model = GaussianHMM(n_components=3, covariance_type="full", n_iter=1000)
-            model.fit(features)
-            
-            logger.info(f"✅ HMM trained: {len(features)} data points")
-            return model
-        
-        except Exception as e:
-            logger.error(f"HMM training error: {e}")
-            return None
-    
-    def train_xgboost(self, df: pd.DataFrame) -> dict:
-        """Entrena XGBoost para signals rápidas"""
-        try:
-            import xgboost as xgb
-            
-            X = df[['returns', 'volatility', 'rsi', 'ma_20', 'ma_50']].dropna()
-            y = (X['returns'].shift(-1) > 0).astype(int)  # Target: sube o baja
-            
-            if len(X) < 100:
-                logger.warning("Insufficient data for XGBoost")
-                return None
-            
-            X = X[:-1]
-            y = y[:-1]
-            
-            model = xgb.XGBClassifier(
-                n_estimators=200,
-                max_depth=6,
-                learning_rate=0.1,
-                random_state=42
-            )
-            model.fit(X, y)
-            
-            logger.info(f"✅ XGBoost trained: {len(X)} data points")
-            return model
-        
-        except Exception as e:
-            logger.error(f"XGBoost training error: {e}")
-            return None
-    
-    def train_garch(self, df: pd.DataFrame) -> dict:
-        """Entrena GARCH para volatilidad condicional"""
-        try:
-            from arch import arch_model
-            
-            returns = df['log_returns'].dropna() * 100  # En %
-            
-            if len(returns) < 100:
-                logger.warning("Insufficient data for GARCH")
-                return None
-            
-            model = arch_model(returns, vol='Garch', p=1, q=1)
-            results = model.fit(disp='off')
-            
-            logger.info(f"✅ GARCH trained: {len(returns)} data points")
-            return results
-        
-        except Exception as e:
-            logger.error(f"GARCH training error: {e}")
-            return None
-    
-    def train_all_models(self) -> dict:
-        """Entrena todos los modelos para todos los assets"""
-        
-        trained_models = {}
-        
-        for asset in self.assets:
-            logger.info(f"\n{'='*60}")
-            logger.info(f"Training models for {asset}")
-            logger.info(f"{'='*60}")
-            
-            # Cargar datos
-            df = self.load_asset_data(asset, months=6)
-            if df is None:
-                logger.warning(f"Skipping {asset}")
-                continue
-            
-            # Entrenar modelos
-            asset_models = {
-                'hmm': self.train_hmm(df),
-                'xgboost': self.train_xgboost(df),
-                'garch': self.train_garch(df),
-                'last_update': datetime.now().isoformat()
-            }
-            
-            trained_models[asset] = asset_models
-        
-        return trained_models
-    
-    def save_models(self, models: dict):
-        """Guarda modelos en pickle cache"""
+
+    def _load_schedule(self) -> Dict:
+        with open(self.schedule_path, 'r', encoding='utf-8') as f:
+            return yaml.safe_load(f)['model_schedule']
+
+    def _load_cache(self) -> Dict:
+        if os.path.exists(self.model_cache_path):
+            try:
+                with open(self.model_cache_path, 'rb') as f:
+                    return pickle.load(f)
+            except Exception as e:
+                logger.error(f"Error cargando cache existente, se arranca de cero: {e}")
+        return {}
+
+    def _save_cache(self, cache: Dict):
         try:
             with open(self.model_cache_path, 'wb') as f:
-                pickle.dump(models, f)
-            
-            logger.info(f"✅ Models saved to {self.model_cache_path}")
+                pickle.dump(cache, f)
+        except Exception as e:
+            logger.error(f"Error guardando cache: {e}")
+
+    def _is_due(self, last_trained_iso, interval_days: int) -> bool:
+        if last_trained_iso is None:
             return True
-        
-        except Exception as e:
-            logger.error(f"Error saving models: {e}")
-            return False
-    
-    def run(self):
-        """Ejecuta entrenamiento completo"""
-        
-        logger.info("🚀 Starting daily model training...")
-        start_time = datetime.now()
-        
+        last = datetime.fromisoformat(last_trained_iso)
+        return (datetime.now() - last) >= timedelta(days=interval_days)
+
+    def load_asset_history(self, asset: str, months: int = 6) -> pd.DataFrame:
         try:
-            # Entrenar todos
-            models = self.train_all_models()
-            
-            # Guardar cache
-            if models:
-                self.save_models(models)
-                
-                elapsed = (datetime.now() - start_time).total_seconds()
-                logger.info(f"✅ Training complete in {elapsed:.1f}s")
-            else:
-                logger.warning("No models trained")
-        
+            conn = sqlite3.connect(self.db_path)
+            cutoff_date = datetime.now() - timedelta(days=30 * months)
+            query = '''
+                SELECT timestamp, open, high, low, price as close, volume
+                FROM market_data WHERE asset = ? AND timestamp >= ? ORDER BY timestamp ASC
+            '''
+            df = pd.read_sql(query, conn, params=(asset, cutoff_date.isoformat()))
+            conn.close()
+
+            if len(df) < 200:
+                logger.warning(f"Historico insuficiente para {asset}: {len(df)} filas")
+                return None
+
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            df = df.sort_values('timestamp').reset_index(drop=True)
+            df = df.set_index('timestamp')
+            df = df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'})
+
+            logger.info(f"Cargado {asset}: {len(df)} velas, {df.index[0].date()} a {df.index[-1].date()}")
+            return df[['Open', 'High', 'Low', 'Close', 'Volume']]
         except Exception as e:
-            logger.error(f"Training failed: {e}")
+            logger.error(f"Error cargando historico de {asset}: {e}")
+            return None
+
+    def run_cycle(self):
+        schedule = self._load_schedule()
+        cache = self._load_cache()
+
+        fast_interval = schedule['fast_tier']['retrain_interval_days']
+        slow_interval = schedule['slow_tier']['retrain_interval_days']
+
+        # NUEVO: se construye UNA sola vez por ciclo (compartido entre
+        # todos los activos) -- el contexto macro no depende del activo,
+        # y así se evita pegarle a Yahoo Finance una vez por activo.
+        macro_features = self.macro_builder.get_macro_features()
+        if not macro_features.empty:
+            logger.info(f"Contexto macro cargado: {list(macro_features.columns)}")
+        else:
+            logger.info("Sin contexto macro disponible este ciclo (se sigue sin él)")
+
+        for asset in self.assets:
+            entry = cache.get(asset, {})
+            fast_due = self._is_due(entry.get('fast', {}).get('last_trained'), fast_interval)
+            slow_due = self._is_due(entry.get('slow', {}).get('last_trained'), slow_interval)
+
+            if not fast_due and not slow_due:
+                logger.info(f"{asset}: nada vencido hoy, se salta.")
+                continue
+
+            raw_df = self.load_asset_history(asset)
+            if raw_df is None:
+                continue
+
+            X_filtered, y, best_feats, returns, df_features = self.engine.prepare_asset_features(
+                asset, raw_df, macro_context=macro_features
+            )
+            if X_filtered is None:
+                logger.warning(f"{asset}: datos insuficientes tras feature engineering, se salta.")
+                continue
+
+            entry['best_feats'] = best_feats
+            entry['features_computed_at'] = datetime.now().isoformat()
+
+            anomaly_detector = entry.get('anomaly_detector')
+
+            if fast_due:
+                logger.info(f"{asset}: reentrenando tier RAPIDO...")
+                fast_models, anomaly_detector = self.engine.fit_fast_tier_experts(
+                    X_filtered, y, returns, existing_anomaly=anomaly_detector
+                )
+                entry['fast'] = {'models': fast_models, 'last_trained': datetime.now().isoformat()}
+                logger.info(f"{asset}: tier rapido OK.")
+
+            if slow_due:
+                logger.info(f"{asset}: reentrenando tier LENTO (puede tardar)...")
+                slow_models, anomaly_detector = self.engine.fit_slow_tier_experts(
+                    X_filtered, y, len(best_feats), anomaly_detector
+                )
+                entry['slow'] = {'models': slow_models, 'last_trained': datetime.now().isoformat()}
+                logger.info(f"{asset}: tier lento OK.")
+
+            entry['anomaly_detector'] = anomaly_detector
+            cache[asset] = entry
+            self._save_cache(cache)
+
+        logger.info("Ciclo de entrenamiento completo.")
+
+    def run(self, check_interval_hours: int = 6):
+        logger.info(f"Iniciando loop de entrenamiento (chequeo cada {check_interval_hours}h)")
+        while True:
+            try:
+                self.run_cycle()
+            except Exception as e:
+                logger.error(f"Error en ciclo de entrenamiento: {e}")
+            time.sleep(check_interval_hours * 3600)
 
 
 if __name__ == "__main__":

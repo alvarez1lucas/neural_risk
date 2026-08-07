@@ -1,362 +1,110 @@
-# 🤖 Neural Risk Engine v0.2.0
+# Neural Risk Engine
 
-**Automated cryptocurrency risk management and portfolio optimization system**
+Motor de trading algorítmico multi-experto para cripto, con arquitectura institucional de 5 capas: ingesta de datos → ingeniería de features → selección estadística de features → comité de 9 modelos → agente de decisión con aprendizaje adaptativo (Thompson Sampling) y hedging a nivel portafolio.
 
-A production-ready microservices architecture for real-time multi-asset trading with neural ensemble models and portfolio optimization.
+## Arquitectura
 
----
+```mermaid
+flowchart TB
+    subgraph L1["Paso 1 · Datos"]
+        A1[BinanceLoader / YahooFinanceLoader] --> A2[DataProcessor<br/>limpieza, tipos, timezone]
+    end
 
-## 🎯 What This System Does
+    subgraph L2["Paso 2 · Feature Engineering"]
+        B1[RiskFeaturePipeline<br/>~30 features: volatilidad, microestructura,<br/>order flow, cointegración, HMM, anomaly score]
+    end
 
-**Input**: Real-time market data (Binance API)  
-**Process**: 9 ensemble experts + portfolio optimization  
-**Output**: Trading signals with entry/exit levels every 5 minutes  
-**Deployment**: 4 independent services running 24/7
+    subgraph L3["Paso 3 · Cortex"]
+        C1[FeatureJury<br/>Granger + Mutual Info + Lasso<br/>consenso 2 de 3 jueces]
+        C2[CausalSelector<br/>causalidad bidireccional]
+    end
 
+    subgraph L4["Paso 4 · Comité de 9 Expertos"]
+        direction LR
+        D1[HMM<br/>régimen]
+        D2[XGBoost<br/>señal rápida]
+        D3[Causal<br/>inference]
+        D4[GARCH<br/>volatilidad]
+        D5[Ensemble<br/>Neural+XGB+Kalman]
+        D6[LSTM/Transformer<br/>forecasting]
+        D7[Anomaly<br/>Detector]
+        D8[Copula*]
+        D9[RL*]
+    end
+
+    subgraph L5["Paso 5 · Agente + Ejecución"]
+        E1[PortfolioAgent<br/>Thompson Sampling, Kelly, Stop-Loss dinámico]
+        E2[StrategyRouter<br/>asignación de capital]
+        E3[PortfolioHedgeOptimizer<br/>Differential Evolution sobre CVaR]
+        E4[OrderExecutor<br/>circuit breakers, rebalanceo real]
+    end
+
+    A2 --> B1 --> C1 & C2 --> D1 & D2 & D3 & D4 & D5 & D6 & D7 & D8 & D9
+    D1 & D2 & D3 & D4 & D5 & D6 & D7 --> E1
+    E1 --> E4
+    E1 -.-> E2
+    E3 --> E4
+
+    style D8 stroke-dasharray: 5 5
+    style D9 stroke-dasharray: 5 5
 ```
-Market Data → Data Fetcher → Engine (9 Experts) → Executor → Live Trading
-                                         ↓
-                                   Portfolio Agent
-                                   (Kelly Criterion)
-```
+<sub>*Copula y RL son piezas de la librería pensadas para escalabilidad futura — implementadas pero no conectadas al motor activo hoy.</sub>
 
----
+### Scheduling de entrenamiento (dos velocidades)
 
-## 🏗️ Architecture Overview
+| Tier | Expertos | Frecuencia | Por qué |
+|---|---|---|---|
+| **Rápido** | HMM, XGBoost, Causal, GARCH, Isolation Forest | 1x/día | Modelos deterministas/basados en árboles — baratos de reentrenar |
+| **Lento** | Ensemble neuronal, LSTM/Transformer, Autoencoder | cada 5 días | Redes con backprop — costosas de reentrenar |
 
-### 5-Layer Microservices
+El ciclo **live** (60-300s) nunca reentrena — solo predice con los modelos cacheados por `train_models.py`. Esto separa por completo el costo de entrenamiento del costo de inferencia.
 
-**1. Data Fetcher** (independent process)
-- Fetches market data every 5 minutes from Binance
-- Caches and stores in SQLite database
-- Handles API rate limits and errors gracefully
+## Resultados de backtest
 
-**2. Model Training** (daily cron job)
-- Trains 9 expert models offline
-- Runs daily at 00:00 UTC
-- Saves trained models to pickle cache
+![Backtest chart](backtest_chart_BTC.png)
 
-**3. Engine** (independent process)
-- Loads trained models every 5 minutes
-- Runs 9 experts in parallel via ThreadPool:
-  - 3 classical models (MA, Volatility, RSI)
-  - 3 ML models (Random Forest, XGBoost, SVM)
-  - 3 statistical models (ARIMA, GARCH, HMM)
-- PASO 5: PortfolioAgent combines signals with Kelly Criterion
-- Outputs trading decisions with confidence levels
+*(Chart generado con `scripts/plot_backtest.py` — equity de la estrategia vs. Buy & Hold, drawdown, y distribución de PnL por trade.)*
 
-**4. Executor** (independent process)
-- Reads trading decisions from database
-- Validates position sizes and daily loss limits
-- Places orders on Binance API
-- Logs all transactions for audit trail
+| Métrica | Valor |
+|---|---|
+| Sharpe Ratio | *(completar con tu corrida real)* |
+| Sortino Ratio | |
+| Max Drawdown | |
+| Win Rate | |
+| Profit Factor | |
+| VaR / CVaR (95%) | |
 
-**5. Dashboard** (optional monitoring)
-- Real-time portfolio metrics
-- PnL tracking and performance charts
-- Alert system for risk thresholds
+## Ingeniería y debugging destacado
 
-### Database Schema
-```sql
-market_data           -- Raw OHLCV from Binance
-engine_decisions      -- Trading signals with confidence
-orders                -- Order execution log
-fills                 -- Filled orders with PnL
-```
+Este proyecto pasó por una auditoría exhaustiva de principio a fin. Algunos hallazgos representativos:
 
----
+- **Look-ahead bias en una feature de "delta sintético"**: usaba `series.shift(-1)` (precio del período siguiente) para calcular el valor de "hoy" — invalidaba cualquier backtest que la usara. Corregido a una diferencia hacia atrás (solo pasado/presente).
+- **Circuit breaker de riesgo diario roto**: dependía de una tabla que nunca se poblaba (`update_fills()` era un `pass`) — el límite de pérdida diaria nunca se activaba, pase lo que pase. Reconectado con cierre real de stop-loss.
+- **Sesgo de Kelly Criterion**: un error de orden de operaciones colapsaba el sizing a 0.05 en toda señal de reversión a la media, sin importar su magnitud real.
+- **Reentrenamiento constante**: el motor reentrenaba los 9 modelos *desde cero en cada ciclo de 60s* — rediseñado con scheduling por tiers (arriba) para separar entrenamiento de inferencia.
+- **Escalabilidad de imports**: el `__init__.py` del paquete importaba todo el árbol de forma ansiosa — cualquier submódulo liviano exigía instalar todas las dependencias pesadas (torch, xgboost, hmmlearn, arch). Reescrito con imports defensivos por símbolo.
 
-## ⚡ Quick Start
+## Stack técnico
 
-### 1. Prerequisites
+`Python` · `PyTorch` · `XGBoost` · `hmmlearn` · `arch (GARCH)` · `statsmodels` · `scikit-learn` · `SQLite` · `ccxt` (Binance) · `scipy.optimize` (Differential Evolution) · `matplotlib`
+
+## Cómo correrlo
 
 ```bash
-# Python 3.9+
-python --version
-
-# Install dependencies
 pip install -r requirements.txt
+
+# Backtest sobre datos históricos
+python scripts/backtest.py --asset BTC --data data/BTC_USD_data.csv
+python scripts/plot_backtest.py --asset BTC --data data/BTC_USD_data.csv
+
+# Sistema en vivo (4 procesos independientes, comunicados por SQLite)
+python scripts/run_data_fetcher.py    # Layer 1: ingesta
+python scripts/train_models.py        # Layer 2: entrenamiento por tiers
+python scripts/run_engine.py          # Layer 3-5: predicción + decisión
+python scripts/run_executor.py        # Layer 6: ejecución + circuit breakers
+python scripts/run_portfolio_hedge.py # Hedging a nivel portafolio (asesor)
 ```
 
-### 2. Configuration
+## Estado del proyecto
 
-Edit `config/config.yaml`:
-```yaml
-mode: production              # or development/backtest
-assets: [BTC, ETH]            # Start with 2
-cycle_time: 300               # 5 minutes
-position_size_pct: 10         # Max 10% per trade
-daily_loss_limit: -5          # Pause if -5% loss
-```
-
-### 3. Validate System
-
-```bash
-python scripts/pre_deploy_check.py
-# Expected output: [OK] PRE-DEPLOY CHECK PASSED - READY TO DEPLOY!
-```
-
-### 4. Deploy 4 Services
-
-**Terminal 1** (Data Fetcher):
-```bash
-python scripts/run_data_fetcher.py
-# Expected: "Fetching market data... [OK]" every 300 seconds
-```
-
-**Terminal 2** (wait 30 seconds then run Engine):
-```bash
-python scripts/run_engine.py
-# Expected: "Processing signals... [OK]" every 300 seconds
-```
-
-**Terminal 3** (wait 30 seconds then run Executor):
-```bash
-python scripts/run_executor.py
-# Expected: "Checking orders... [OK]" every 300 seconds
-```
-
-**Terminal 4** (optional Dashboard):
-```bash
-jupyter notebook notebooks/live_dashboard.ipynb
-# Opens live monitoring dashboard
-```
-
-### 5. Monitor
-
-```bash
-# Watch real-time logs
-tail -f logs/neural_risk.log
-
-# Check database growth (should increase every cycle)
-ls -lh data/neural_risk.db
-
-# Query trading signals
-sqlite3 data/neural_risk.db "SELECT * FROM engine_decisions LIMIT 5;"
-```
-
----
-
-## 📊 What to Expect
-
-### During First Hour
-- Data Fetcher: Fetches 5min candlestick every 300s ✓
-- Engine: Generates signals with confidence scores ✓
-- Executor: Validates and places mock orders (until API keys configured) ✓
-- Dashboard: Shows 12+ cycles completed ✓
-
-### Performance Metrics
-After 24 hours of live trading, you'll see:
-- **Sortino Ratio** (risk-adjusted returns)
-- **Win Rate** (% of profitable trades)
-- **Profit Factor** (wins ÷ losses)
-- **Daily PnL** (exact profit/loss tracking)
-
-### Files to Monitor
-```
-logs/neural_risk.log          -- Real-time activity log
-data/neural_risk.db           -- Trading history (grows each cycle)
-data/trained_models.pkl       -- Model cache (updated daily)
-config/config.yaml            -- Live configuration
-```
-
----
-
-## 🔧 Key Features
-
-✅ **Multi-Asset**: Supports 2-10+ cryptocurrencies  
-✅ **Ensemble**: 9 diverse expert models for robust signals  
-✅ **Parallel**: ThreadPool-based concurrent processing  
-✅ **Automated**: 100% automatic after deployment  
-✅ **Scalable**: Easy to add new assets or experts  
-✅ **Safe**: Daily loss limits + position size controls  
-✅ **Auditable**: Complete transaction logging  
-✅ **Real-time**: Decisions every 5 minutes  
-
----
-
-## 📁 Project Structure
-
-```
-neural-risk/
-├── neural_risk/
-│   ├── data/                 -- Data loading & preprocessing
-│   ├── models/               -- ML model implementations
-│   ├── metrics/              -- Backtest & risk metrics
-│   ├── optimization/         -- Portfolio optimization (Kelly)
-│   ├── agents/               -- Strategy routers
-│   └── cortex/               -- Causal feature selection
-├── scripts/
-│   ├── run_data_fetcher.py   -- Service 1: Data collection
-│   ├── run_engine.py         -- Service 2: Signal generation
-│   ├── run_executor.py       -- Service 3: Order execution
-│   ├── train_models.py       -- Daily model training
-│   └── pre_deploy_check.py   -- Deployment validation
-├── config/
-│   └── config.yaml           -- Production configuration
-├── data/
-│   ├── neural_risk.db        -- SQLite database (auto-created)
-│   ├── BTC_USD_data.csv      -- Historical prices
-│   └── trained_models.pkl    -- Model cache (auto-created)
-├── logs/
-│   └── neural_risk.log       -- Activity logs
-└── notebooks/
-    ├── live_dashboard.ipynb  -- Real-time monitoring
-    └── backtest_analysis.ipynb -- Historical analysis
-```
-
----
-
-## 🔑 Configuration Guide
-
-### `config/config.yaml`
-
-```yaml
-# Mode: production, development, or backtest
-mode: production
-
-# Assets to trade (start with 2, scale to 5+)
-assets:
-  - BTC
-  - ETH
-
-# Cycle timing (300s = 5 min, SAFE for free APIs)
-cycle_timing:
-  data_fetcher: 300      # Fetch market data every 5 min
-  engine: 300            # Generate signals every 5 min
-  executor: 300          # Check and execute orders every 5 min
-
-# Trading thresholds
-signals:
-  long_threshold: 0.60   # BUY if consensus > 60%
-  short_threshold: -0.60 # SELL if consensus < -60%
-  min_confidence: 0.50   # Minimum expert agreement
-
-# Risk management
-risk:
-  max_position_size: 0.10       # Max 10% per trade
-  daily_loss_limit: -0.05       # Pause if -5% daily loss
-  use_kelly_criterion: true     # Fractional Kelly (safer)
-  kelly_fraction: 0.25          # Use 25% of Kelly (conservative)
-
-# Model training
-training:
-  schedule: "00:00"             # Run daily at 00:00 UTC
-  lookback_days: 180            # Use 6 months of historical data
-  validation_split: 0.20        # 80% train, 20% validation
-  retraining_frequency: "daily"  # Can be: daily, weekly, monthly
-```
-
----
-
-## 🚨 Troubleshooting
-
-### Issue: "ModuleNotFoundError: No module named 'neural_risk'"
-
-**Solution**: Install package in development mode
-```bash
-cd f:\quant_risk\neural-risk
-pip install -e .
-```
-
-### Issue: "No module named 'ensemble_trainer'"
-
-**Solution**: Verify installation
-```bash
-python -c "from neural_risk.models.ensemble_trainer import EnsembleTrainer; print('OK')"
-```
-
-### Issue: "API key not configured"
-
-**Solution**: System runs in MOCK mode (simulated orders)
-- To use real trading, set `BINANCE_API_KEY` and `BINANCE_API_SECRET` in environment
-- For testing, MOCK mode is fine
-
-### Issue: "Database is locked"
-
-**Solution**: Only one engine can write to DB at a time
-- Ensure only ONE `run_engine.py` instance is running
-- Kill any zombie processes: `taskkill /F /IM python.exe` (Windows)
-
----
-
-## 📈 Performance Targets
-
-After 30 days of live trading:
-- Sortino Ratio: > 1.5
-- Win Rate: > 50%
-- Profit Factor: > 1.5
-- Max Drawdown: < 15%
-- Daily Sharpe: > 0.5
-
----
-
-## 🔄 Updating Models
-
-Models are trained daily at 00:00 UTC using the last 180 days of data. To manually retrain:
-
-```bash
-python scripts/train_models.py
-# Output: [OK] Models saved to data/trained_models.pkl
-```
-
----
-
-## 🛠️ Development
-
-### Add a New Expert Model
-
-1. Create model class in `neural_risk/models/`
-2. Inherit from `BaseModel`
-3. Implement `fit()` and `predict()` methods
-4. Register in `EnsembleTrainer`
-
-### Add a New Asset
-
-1. Edit `config/config.yaml` assets list
-2. Restart all 4 services
-3. System automatically handles new asset
-
-### Adjust Signal Thresholds
-
-1. Edit `config/config.yaml` signals section
-2. No restart needed (config reloaded each cycle)
-3. Changes take effect next cycle
-
----
-
-## 🤝 Support
-
-**For issues**:
-1. Check `logs/neural_risk.log` for error messages
-2. Run `python scripts/pre_deploy_check.py` to validate system
-3. Review configuration in `config/config.yaml`
-
----
-
-## 📜 License
-
-Proprietary - All rights reserved
-
----
-
-## ✅ Quick Validation
-
-After deployment, run this to confirm everything works:
-
-```bash
-# Check all services are running
-tasklist | findstr python
-
-# Verify database exists and growing
-dir /s data\neural_risk.db
-
-# View latest trading signals
-sqlite3 data/neural_risk.db "SELECT timestamp, asset, signal, confidence FROM engine_decisions ORDER BY timestamp DESC LIMIT 5;"
-
-# Expected: 5+ rows with recent timestamps and signals between -1.0 and 1.0
-```
-
----
-
-**Status**: ✅ Production Ready | **Version**: 0.2.0 | **Last Updated**: Feb 1, 2026
+Ver [`STATUS.md`](STATUS.md) para el detalle completo de qué está validado, qué quedó documentado como limitación conocida, y qué es alcance futuro de la librería.
