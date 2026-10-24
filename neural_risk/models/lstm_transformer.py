@@ -160,6 +160,8 @@ class SequentialForecastingEnsemble:
         """
         X_batch = X_batch.to(self.device)
         y_batch = y_batch.to(self.device)
+        self.lstm.train()
+        self.transformer.train()
         
         # LSTM
         self.lstm_optimizer.zero_grad()
@@ -182,6 +184,9 @@ class SequentialForecastingEnsemble:
         Predice con ambos modelos y blendea.
         """
         X = X.to(self.device)
+        # Sin eval() el dropout seguía activo al predecir -> forecasts ruidosos.
+        self.lstm.eval()
+        self.transformer.eval()
         
         with torch.no_grad():
             lstm_mu, lstm_sigma = self.lstm(X)
@@ -195,7 +200,7 @@ class SequentialForecastingEnsemble:
         tf_w = tf_conf / total_conf
         
         ensemble_mu = lstm_w * lstm_mu + tf_w * tf_mu
-        ensemble_sigma = np.sqrt(
+        ensemble_sigma = torch.sqrt(
             (lstm_w ** 2) * (lstm_sigma ** 2) + 
             (tf_w ** 2) * (tf_sigma ** 2)
         )

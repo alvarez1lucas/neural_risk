@@ -285,12 +285,15 @@ class OrderExecutor:
         """Notional real (quantity*price) por activo, sumando todas las órdenes FILLED."""
         try:
             conn = sqlite3.connect(self.db_path)
-            query = "SELECT asset, quantity, price FROM orders WHERE status = 'FILLED'"
+            query = "SELECT asset, side, quantity, price FROM orders WHERE status = 'FILLED'"
             df = pd.read_sql(query, conn)
             conn.close()
             if df.empty:
                 return {}
-            df['notional'] = df['quantity'] * df['price']
+            # FIX: los SELL (shorts) sumaban notional POSITIVO -> el
+            # rebalanceo los tomaba como exposición larga.
+            sign = np.where(df['side'] == 'SELL', -1.0, 1.0)
+            df['notional'] = sign * df['quantity'] * df['price']
             return df.groupby('asset')['notional'].sum().to_dict()
         except Exception as e:
             logger.error(f"Error calculando notional actual: {e}")

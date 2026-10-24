@@ -145,12 +145,27 @@ class ModelTrainer:
             if raw_df is None:
                 continue
 
-            X_filtered, y, best_feats, returns, df_features = self.engine.prepare_asset_features(
-                asset, raw_df, macro_context=macro_features
+            # FIX: antes el jurado corría en CADA reentreno rápido y pisaba
+            # best_feats, mientras los modelos lentos (Ensemble/LSTM/
+            # Autoencoder) seguían entrenados con el set anterior -> en
+            # predicción recibían otras columnas. Ahora el jurado solo
+            # re-selecciona cuando también se reentrena el tier lento; si
+            # no, el tier rápido se reentrena con el MISMO set.
+            df_features = self.engine.build_features(asset, raw_df, macro_features)
+            fixed = None if (slow_due or 'best_feats' not in entry) else entry['best_feats']
+            X_filtered, y, best_feats, returns, _ = self.engine.select_features(
+                asset, df_features, fixed_feats=fixed
             )
+            if X_filtered is None and fixed is not None:
+                logger.warning(f"{asset}: el set de features previo ya no está disponible, se re-selecciona todo.")
+                fixed = None
+                X_filtered, y, best_feats, returns, _ = self.engine.select_features(asset, df_features)
             if X_filtered is None:
                 logger.warning(f"{asset}: datos insuficientes tras feature engineering, se salta.")
                 continue
+            if fixed is None:
+                # Set nuevo de columnas -> AMBOS tiers se reentrenan con él.
+                fast_due = slow_due = True
 
             entry['best_feats'] = best_feats
             entry['features_computed_at'] = datetime.now().isoformat()

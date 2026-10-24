@@ -52,6 +52,10 @@ class GARCHVolatilityExpert:
         self.fitted_model = None
         self.last_return = None
         self.vol_history = []
+        # Los retornos diarios (~0.01-0.05) están mal escalados para el
+        # optimizador de arch -- se fitea sobre retornos*100 y se des-escala
+        # al reportar volatilidades.
+        self.scale = 100.0
         
     def fit(self, returns: np.ndarray) -> None:
         """
@@ -70,41 +74,35 @@ class GARCHVolatilityExpert:
         
         # Fitear modelo
         try:
-            if self.model_type == 'egarch':
-                model = arch_model(
-                    returns_clean,
-                    vol=f'EGARCH',
-                    p=self.p,
-                    q=self.q,
-                    o=self.o,
-                    rescale=False
-                )
-            else:
-                model = arch_model(
-                    returns_clean,
-                    vol='Garch',
-                    p=self.p,
-                    q=self.q,
-                    rescale=False
-                )
-            
-            self.fitted_model = model.fit(disp='off')
+            self.fitted_model = self._build_model(returns_clean).fit(disp='off')
             self.last_return = returns_clean[-1]
-            
         except Exception as e:
             print(f"⚠️  GARCH fit failed: {e}")
             self.fitted_model = None
-    
-    def forecast_volatility(self, horizon: int = 1) -> Dict[str, float]:
+
+    def _build_model(self, returns_clean: np.ndarray):
+        if self.model_type == 'egarch':
+            return arch_model(returns_clean * self.scale, vol='EGARCH',
+                              p=self.p, q=self.q, o=self.o, rescale=False)
+        return arch_model(returns_clean * self.scale, vol='Garch',
+                          p=self.p, q=self.q, rescale=False)
+
+    def forecast_volatility(self, horizon: int = 1,
+                            recent_returns: Optional[np.ndarray] = None) -> Dict[str, float]:
         """
         Forecast de volatilidad para hedging.
-        
+
         Args:
             horizon: períodos adelante
-            
+            recent_returns: NUEVO -- si se pasa, se re-filtra la varianza
+                condicional sobre estos retornos con los parámetros YA
+                estimados (sin refitear). Sin esto, el forecast quedaba
+                congelado en el último dato del entrenamiento entre
+                reentrenamientos.
+
         Returns:
             {
-                'vol_forecast': volatilidad predicha,
+                'vol_forecast': volatilidad predicha (escala de retornos),
                 'vol_signal': HIGH/MID/LOW,
                 'vol_zscore': z-score vs histórico
             }
@@ -116,15 +114,26 @@ class GARCHVolatilityExpert:
                 'vol_zscore': 0.0,
                 'hedging_intensity': 0.0
             }
-        
+
         try:
+            result = self.fitted_model
+            if recent_returns is not None:
+                rr = np.asarray(recent_returns, dtype=float).flatten()
+                rr = rr[~np.isnan(rr)]
+                if len(rr) >= 20:
+                    result = self._build_model(rr).fix(self.fitted_model.params)
+
             # Forecast condicional
-            forecast = self.fitted_model.forecast(horizon=horizon)
+            forecast = result.forecast(horizon=horizon)
             variance_forecast = forecast.variance.iloc[-1, -1]
-            vol_forecast = np.sqrt(variance_forecast)
-            
-            # Historical mean/std
-            hist_vols = np.sqrt(self.fitted_model.conditional_volatility.values)
+            vol_forecast = np.sqrt(variance_forecast) / self.scale
+
+            # FIX: conditional_volatility ya es un desvío estándar (no una
+            # varianza) y viene como ndarray -- antes se hacía
+            # np.sqrt(...values), que tiraba AttributeError en TODOS los
+            # forecasts (y aunque no tirara, comparaba std contra sqrt(std)).
+            hist_vols = np.asarray(result.conditional_volatility, dtype=float) / self.scale
+            hist_vols = hist_vols[~np.isnan(hist_vols)]
             vol_mean = np.mean(hist_vols[-100:]) if len(hist_vols) > 100 else np.mean(hist_vols)
             vol_std = np.std(hist_vols[-100:]) if len(hist_vols) > 100 else np.std(hist_vols)
             
@@ -214,37 +223,59 @@ class MultiWindowGARCH:
     
     def fit_all(self, returns: np.ndarray) -> None:
         """Entrena GARCH en todas las ventanas"""
+        self.fitted_windows = []
         for ws in self.window_sizes:
             if len(returns) >= ws + 20:
                 window_returns = returns[-ws:] if len(returns) > ws else returns
                 self.models[ws].fit(window_returns)
+                if self.models[ws].fitted_model is not None:
+                    self.fitted_windows.append(ws)
     
-    def forecast_all(self) -> Dict:
-        """Forecast de volatilidad en todas las ventanas"""
+    def forecast_all(self, recent_returns: Optional[np.ndarray] = None) -> Dict:
+        """
+        Forecast de volatilidad en todas las ventanas. Solo se reportan las
+        ventanas que efectivamente fitearon -- antes las no fiteadas (ej.
+        10/30, por debajo del mínimo de 50 datos) entraban al promedio con
+        valores por defecto y diluían la señal.
+        """
         results = {}
-        for ws in self.window_sizes:
-            results[ws] = self.models[ws].forecast_volatility(horizon=1)
+        for ws in getattr(self, 'fitted_windows', self.window_sizes):
+            rr = recent_returns[-ws:] if recent_returns is not None else None
+            results[ws] = self.models[ws].forecast_volatility(horizon=1, recent_returns=rr)
         return results
     
-    def get_hedging_signal(self) -> Dict:
+    def get_hedging_signal(self, recent_returns: Optional[np.ndarray] = None) -> Dict:
         """
         Señal de hedging agregada.
         Si vol está alta en muchas ventanas → reduce exposición
         """
-        all_forecasts = self.forecast_all()
+        all_forecasts = self.forecast_all(recent_returns)
+        if not all_forecasts:
+            return {'crisis_detected': False, 'high_signal_count': 0, 'avg_vol_zscore': 0.0,
+                    'recommended_hedge_intensity': 0.5, 'hedging_intensity': 0.5,
+                    'vol_forecast': np.nan, 'window_signals': {}}
         
         # Contar HIGH signals
         high_count = sum(1 for f in all_forecasts.values() if f['vol_signal'] == 'HIGH')
-        crisis_detected = high_count >= 2  # Si ≥2 ventanas en HIGH
+        crisis_detected = high_count >= max(1, (len(all_forecasts) + 1) // 2)  # mayoría de ventanas en HIGH
         
         avg_zscore = np.mean([f['vol_zscore'] for f in all_forecasts.values()])
         avg_intensity = np.mean([f['hedging_intensity'] for f in all_forecasts.values()])
+        vols = [f['vol_forecast'] for f in all_forecasts.values() if np.isfinite(f['vol_forecast'])]
         
+        # 'hedging_intensity' y 'vol_forecast' son las claves que lee
+        # PortfolioAgent -- antes no existían en este dict, así que el
+        # agente siempre caía a sus defaults.
         return {
             'crisis_detected': crisis_detected,
             'high_signal_count': high_count,
             'avg_vol_zscore': float(avg_zscore),
-            'recommended_hedge_intensity': avg_intensity,
+            'recommended_hedge_intensity': float(avg_intensity),
+            'hedging_intensity': float(avg_intensity),
+            'vol_forecast': float(np.mean(vols)) if vols else np.nan,
             'window_signals': {ws: forecasts['vol_signal'] 
                              for ws, forecasts in all_forecasts.items()}
         }
+    
+
+

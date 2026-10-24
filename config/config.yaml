@@ -38,11 +38,20 @@ signals:
   long_threshold: 0.60
   short_threshold: -0.60
   min_confidence: 0.50
-  sl_adaptive_threshold: 0.70
+  # Stop/take-profit en múltiplos de la vol realizada (20 barras), alineados
+  # con las barreras del triple-barrier labeling (ver 'labeling').
+  sl_vol_mult: 2.0
+  tp_vol_mult: 2.0
+  max_holding_bars: 5
+
   fractional_kelly: 0.25
   max_position_size: 0.10
   base_staking_apy: 0.05
   staking_min_amount: 100   # NOTA: sin consumidor todavia (config muerto)
+
+labeling:
+  t_events: 5        # barrera vertical (barras)
+  pt_sl: [2, 2]      # barreras en múltiplos de vol: simétricas = target direccional
 
 expert_evaluation:
   lookback_window: 100
@@ -127,6 +136,8 @@ backtest:
   start_date: "2021-01-01"
   end_date: "2025-12-31"
   initial_capital: 100000
-  slippage_pct: 0.001
-  commission_pct: 0.001
+  fee_rate: 0.001          # comisión por lado (Binance spot taker ~0.1%)
+  slippage_rate: 0.0005    # slippage por lado
+  retrain_every_bars: 30   # cada cuántas barras se reentrena (walk-forward)
+  min_train_bars: 500      # historia mínima antes del primer entrenamiento
   continue_on_error: true

@@ -92,9 +92,13 @@ class EnsembleTrainer:
     def create_sequences(self, df, target, window_size=10):
         """Convierte DF plano en ventanas temporales [Batch, Time, Features]"""
         X, y = [], []
-        for i in range(len(df) - window_size):
-            X.append(df.iloc[i : i + window_size].values)
-            y.append(target.iloc[i + window_size])
+        # FIX: la ventana que TERMINA en la fila t se empareja con la
+        # etiqueta de t (antes, t+1) -- igual que en predicción, donde la
+        # última ventana termina en la barra actual.
+        values = df.values
+        for i in range(len(df) - window_size + 1):
+            X.append(values[i : i + window_size])
+            y.append(target.iloc[i + window_size - 1])
         return torch.FloatTensor(np.array(X)), torch.FloatTensor(np.array(y))
     
     def prepare_data(self, df_features, target, train_split=0.8, window_size=10):
@@ -153,6 +157,7 @@ class EnsembleTrainer:
         for epoch in range(epochs):
             # ===== FASE 1: Entrenar Neural =====
             train_loss_neural = 0
+            self.neural_model.train()
             for X_batch, y_batch in train_loader:
                 X_batch = X_batch.to(self.device)
                 y_batch = y_batch.to(self.device)
@@ -177,6 +182,7 @@ class EnsembleTrainer:
             neural_preds = []
             xgb_preds = []
             
+            self.neural_model.eval()
             with torch.no_grad():
                 for X_batch, y_batch in test_loader:
                     X_batch = X_batch.to(self.device)
@@ -189,16 +195,12 @@ class EnsembleTrainer:
             
             xgb_pred = self.xgb_model.predict(xgb_data['xgb_X_test'])
             
-            # FIX: 'returns_realized' ya se calculaba acá, pero antes
-            # nunca se le pasaba al Kalman -- self.kalman.update() no se
-            # llamaba en ningún lado del archivo. Resultado: self.history
-            # quedaba vacío para siempre, y get_regime() devolvía 'MID'
-            # siempre, sin importar la volatilidad real observada.
-            # Ahora se alimenta el filtro con la volatilidad realizada de
-            # este epoch ANTES de preguntar el régimen, así el filtro
-            # tiene con qué adaptarse.
-            returns_realized = np.std(xgb_data['y_test'])
-            self.kalman.update(returns_realized)
+            # FIX: antes se alimentaba el Kalman con np.std(y_test) -- la
+            # std de las ETIQUETAS triple-barrier (-1/0/1, ~0.7), no una
+            # volatilidad de retornos. Con umbrales de 0.015/0.03 eso dejaba
+            # el régimen clavado en 'HIGH'. El Kalman ahora se alimenta
+            # solo con volatilidad realizada de retornos, desde
+            # engine.predict_with_cached_experts().
             regime = self.kalman.get_regime()
             weights = regime_weights[regime]
             
@@ -261,14 +263,21 @@ class EnsembleTrainer:
         marcado como posible mejora si notás que el régimen se
         'congela' entre reentrenamientos.
         """
+        # FIX: X_test llega CRUDO ([window, n_features]) pero ambos modelos
+        # se entrenaron sobre datos escalados con self.scaler -- y XGBoost
+        # se entrenó fila a fila ([n, n_features]), no con la ventana
+        # aplanada ([1, window*n_features]), lo que tiraba
+        # 'Feature shape mismatch' en TODOS los ciclos.
+        X_scaled = self.scaler.transform(np.nan_to_num(np.asarray(X_test, dtype=float)))
+
         self.neural_model.eval()
         with torch.no_grad():
-            X_tensor = torch.FloatTensor(X_test).to(self.device)
+            X_tensor = torch.FloatTensor(X_scaled).to(self.device)
             mu, sigma, _ = self.neural_model(X_tensor.unsqueeze(0))
             neural_pred = mu.squeeze().cpu().item()
             neural_std = sigma.squeeze().cpu().item()
         
-        xgb_pred = self.xgb_model.predict(X_test.reshape(1, -1))[0]
+        xgb_pred = float(self.xgb_model.predict(X_scaled[-1:])[0])
         
         regime = self.kalman.get_regime()
         weights = {'LOW': [0.5, 0.3, 0.2], 'MID': [0.6, 0.25, 0.15], 'HIGH': [0.7, 0.2, 0.1]}[regime]
