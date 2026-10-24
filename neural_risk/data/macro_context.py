@@ -103,7 +103,27 @@ class MacroContextBuilder:
 
         return out
 
-    def _load_cache(self) -> Optional[Dict]:
+    def load_raw_from_csv(self, csv_paths: Dict[str, str]) -> pd.DataFrame:
+        """
+        NUEVO: arma el mismo DataFrame que fetch_raw() pero desde CSVs
+        locales (ej. data/raw/VIX_Yahoo_Historical_Daily_Data.csv) -- para
+        backtests reproducibles y sin depender de Yahoo Finance.
+        csv_paths: {'VIX': ruta, 'DXY': ruta, ...}, columnas Date + Close.
+        """
+        series_list = []
+        for name, path in csv_paths.items():
+            try:
+                df = pd.read_csv(path)
+                date_col = 'Date' if 'Date' in df.columns else df.columns[0]
+                df[date_col] = pd.to_datetime(df[date_col]).dt.tz_localize(None)
+                series_list.append(df.set_index(date_col)['Close'].rename(f'MACRO_{name}_Close'))
+            except Exception as e:
+                print(f"⚠️  MacroContext: no se pudo leer {name} ({path}): {e}")
+        if not series_list:
+            return pd.DataFrame()
+        return pd.concat(series_list, axis=1).sort_index()
+
+    def _load_cache(self, period: Optional[str] = None) -> Optional[Dict]:
         if not os.path.exists(self.cache_path):
             return None
         try:
@@ -112,15 +132,19 @@ class MacroContextBuilder:
             age_hours = (datetime.now() - cache['fetched_at']).total_seconds() / 3600
             if age_hours > self.max_age_hours:
                 return None
+            # FIX: el cache no guardaba el 'period' -- un pedido de '2y'
+            # devolvía un cache de '1y' sin avisar.
+            if period is not None and cache.get('period') != period:
+                return None
             return cache
         except Exception:
             return None
 
-    def _save_cache(self, features_df: pd.DataFrame):
+    def _save_cache(self, features_df: pd.DataFrame, period: Optional[str] = None):
         try:
             os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
             with open(self.cache_path, 'wb') as f:
-                pickle.dump({'fetched_at': datetime.now(), 'features': features_df}, f)
+                pickle.dump({'fetched_at': datetime.now(), 'period': period, 'features': features_df}, f)
         except Exception as e:
             print(f"⚠️  MacroContext: no se pudo guardar cache: {e}")
 
@@ -132,7 +156,7 @@ class MacroContextBuilder:
         lento, no hace falta refrescarlo tan seguido).
         """
         if not force_refresh:
-            cached = self._load_cache()
+            cached = self._load_cache(period)
             if cached is not None:
                 return cached['features']
 
@@ -142,11 +166,12 @@ class MacroContextBuilder:
             return pd.DataFrame()
 
         features_df = self.compute_features(raw_df)
-        self._save_cache(features_df)
+        self._save_cache(features_df, period)
         return features_df
 
 
-def merge_macro_context(df_features: pd.DataFrame, macro_features: pd.DataFrame) -> pd.DataFrame:
+def merge_macro_context(df_features: pd.DataFrame, macro_features: pd.DataFrame,
+                        lag_days: int = 1) -> pd.DataFrame:
     """
     Alinea el contexto macro al índice del activo (ffill -- ver nota de
     look-ahead en el docstring del módulo) y lo concatena. Si
@@ -156,5 +181,16 @@ def merge_macro_context(df_features: pd.DataFrame, macro_features: pd.DataFrame)
     if macro_features is None or macro_features.empty:
         return df_features
 
-    macro_aligned = macro_features.reindex(df_features.index, method='ffill')
+    # FIX (look-ahead): el Close diario de Yahoo de la fecha D se conoce
+    # recién al cierre de NY (~21:00 UTC), pero una vela cripto fechada
+    # 'D 00:00' se abre a medianoche -- alinear D con D usaba un dato que
+    # todavía no existía. Con lag_days=1 la vela D ve el cierre macro de D-1.
+    macro = macro_features.sort_index()
+    if lag_days:
+        macro = macro.copy()
+        macro.index = macro.index + pd.Timedelta(days=lag_days)
+    idx = df_features.index
+    if getattr(idx, 'tz', None) is not None:
+        macro.index = macro.index.tz_localize(idx.tz)
+    macro_aligned = macro.reindex(idx, method='ffill')
     return pd.concat([df_features, macro_aligned], axis=1)

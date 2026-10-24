@@ -76,7 +76,9 @@ class EngineService:
             initial_capital=self.config['backtest']['initial_capital'],
             long_threshold=self.config['signals']['long_threshold'],
             short_threshold=self.config['signals']['short_threshold'],
-            adaptive_sl_threshold=self.config['signals']['sl_adaptive_threshold'],
+            min_confidence=self.config['signals']['min_confidence'],
+            sl_vol_mult=self.config['signals']['sl_vol_mult'],
+            tp_vol_mult=self.config['signals']['tp_vol_mult'],
             base_staking_apy=self.config['signals']['base_staking_apy'],
             fractional_kelly=self.config['signals']['fractional_kelly'],
             max_position_size=self.config['signals']['max_position_size']

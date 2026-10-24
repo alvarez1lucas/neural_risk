@@ -49,8 +49,13 @@ class BinanceLoader:
         Pagina hacia atrás para juntar más historico del que Binance
         devuelve en una sola llamada. Util para train_models.py.
         """
+        # FIX: en ccxt 'since' devuelve velas HACIA ADELANTE desde esa fecha
+        # -- con since = (primera vela - 1ms) se volvía a pedir el mismo
+        # bloque y nunca se pasaba de ~batch_size velas. Ahora se arranca
+        # en (ahora - total_candles * timeframe) y se pagina hacia adelante.
+        tf_ms = self.client.parse_timeframe(timeframe) * 1000
+        since = self.client.milliseconds() - total_candles * tf_ms
         all_frames = []
-        since = None
         remaining = total_candles
 
         while remaining > 0:
@@ -59,7 +64,7 @@ class BinanceLoader:
             if df_batch.empty:
                 break
             all_frames.append(df_batch)
-            since = int(df_batch.index[0].timestamp() * 1000) - 1
+            since = int(df_batch.index[-1].timestamp() * 1000) + tf_ms
             remaining -= len(df_batch)
             if len(df_batch) < limit:
                 break
@@ -67,7 +72,7 @@ class BinanceLoader:
         if not all_frames:
             return pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume'])
 
-        combined = pd.concat(all_frames[::-1])
+        combined = pd.concat(all_frames)
         combined = combined[~combined.index.duplicated(keep='first')]
         return combined.sort_index()
 
