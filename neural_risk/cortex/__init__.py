@@ -1,5 +1,16 @@
 # neural_risk/cortex/__init__.py
-from .feature_jury import FeatureJury
-from .causal_selector import CausalSelector
+# Imports perezosos: ambos módulos necesitan statsmodels (extra [ml]).
+import importlib
 
-__all__ = ['FeatureJury', 'CausalSelector']
+_LAZY = {
+    'FeatureJury': '.feature_jury',
+    'CausalSelector': '.causal_selector',
+}
+
+__all__ = list(_LAZY)
+
+
+def __getattr__(name):
+    if name in _LAZY:
+        return getattr(importlib.import_module(_LAZY[name], __name__), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
