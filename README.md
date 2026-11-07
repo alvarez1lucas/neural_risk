@@ -88,7 +88,7 @@ Backtest walk-forward sobre BTC diario, del 2022-08 al 2026-08 (1.449 barras fue
 | Trades | 6 | — |
 | Acierto direccional por experto | XGB 48.5% · Causal 52.0% · LSTM 48.8% · Ensemble 49.9% | — |
 
-![Motor original](docs/img/motor_original_BTC_1D.png)
+![Motor original](https://raw.githubusercontent.com/alvarez1lucas/neural_risk/v0.2.0/neural_risk/docs/img/motor_original_BTC_1D.png)
 
 **Por qué no funciona.** Medí el poder predictivo de cada feature por separado: la correlación de rango (IC) con el retorno de los 5 días siguientes, contra 20 columnas de ruido aleatorio como control.
 
@@ -112,7 +112,7 @@ Backtest walk-forward sobre BTC diario, del 2022-08 al 2026-08 (1.449 barras fue
 
 Los parámetros se eligieron mirando solo BTC. **ETH y SOL funcionan como prueba fuera de muestra**: nunca se usaron para ajustar nada, y la estrategia gana aunque los dos activos cayeron más del 50% en el período. Gana tanto en longs como en shorts.
 
-![BTC intradía](docs/img/intraday_BTC.png)
+![BTC intradía](https://raw.githubusercontent.com/alvarez1lucas/neural_risk/v0.2.0/neural_risk/docs/img/intraday_BTC.png)
 
 #### Cuánto queda con las comisiones de Binance (BTC, 1x)
 
@@ -215,6 +215,13 @@ El proyecto pasó por una auditoría completa. Los bugs más importantes se conf
 ## Cómo correrlo
 
 ```bash
+# Como librería (PyPI)
+pip install neural-risk            # core: loader de Binance Vision, features de derivados, métricas
+pip install "neural-risk[ml]"      # + modelos (torch, xgboost, hmmlearn, arch, statsmodels)
+pip install "neural-risk[all]"     # + conectores en vivo (ccxt, yfinance)
+
+# Desde el repo (scripts de backtest y servicios en vivo)
+git clone https://github.com/alvarez1lucas/neural_risk.git && cd neural_risk
 pip install -r requirements.txt
 
 # --- Pipeline intradía de derivados ---
@@ -252,5 +259,3 @@ Los resultados se guardan en `backtest_results/`: equity, trades, métricas y gr
 - ✅ Motor original auditado, corregido y ejecutable de punta a punta (sin ventaja predictiva sobre datos OHLCV diarios).
 - ✅ Pipeline intradía de derivados con ventaja fuera de muestra en 3 activos, neta de costos.
 - ⏳ Pendiente: paper trading en el testnet de Binance Futures, dimensionamiento de la posición según la volatilidad, y conectar la señal ridge al executor live.
-
-Ver [`STATUS.md`](STATUS.md) para el historial de la auditoría.

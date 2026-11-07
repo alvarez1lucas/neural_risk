@@ -13,6 +13,52 @@ import networkx as nx
 from hmmlearn import hmm
 
 
+# ============================================================================
+# HELPERS CAUSALES
+# ----------------------------------------------------------------------------
+# FIX (look-ahead): IsolationForest, KMeans y GaussianHMM se fiteaban sobre
+# la serie COMPLETA en cada transform() -- cada fila "veía" el futuro (y el
+# HMM además devolvía probabilidades smoothed, que usan observaciones
+# posteriores). Ahora se fitean por bloques: el modelo que etiqueta las
+# filas [t, t+refit_every) se entrenó SOLO con filas < t. Las filas antes de
+# min_train quedan NaN (warm-up). Esto también permite calcular las
+# features UNA vez sobre todo el histórico y recortarlas en el backtest
+# walk-forward sin leakage.
+# ============================================================================
+CAUSAL_MIN_TRAIN = 200
+CAUSAL_REFIT_EVERY = 50
+
+
+def _causal_blocks(n: int, min_train: int = None, refit_every: int = None):
+    min_train = CAUSAL_MIN_TRAIN if min_train is None else min_train
+    refit_every = CAUSAL_REFIT_EVERY if refit_every is None else refit_every
+    for t in range(min_train, n, refit_every):
+        yield t, min(t + refit_every, n)
+
+
+def _diag_covars(model) -> np.ndarray:
+    cov = np.asarray(model.covars_)
+    return np.diagonal(cov, axis1=1, axis2=2) if cov.ndim == 3 else cov
+
+
+def _hmm_filtered_probs(model, obs: np.ndarray) -> np.ndarray:
+    """P(estado_t | obs_0..t) -- forward algorithm, sin usar el futuro."""
+    means = model.means_
+    var = np.maximum(_diag_covars(model), 1e-12)
+    log_emis = -0.5 * (np.log(2 * np.pi * var)[None, :, :] +
+                       (obs[:, None, :] - means[None, :, :]) ** 2 / var[None, :, :]).sum(axis=2)
+    trans = model.transmat_
+    log_alpha = np.log(np.maximum(model.startprob_, 1e-300)) + log_emis[0]
+    out = np.empty_like(log_emis)
+    for t in range(len(obs)):
+        if t > 0:
+            m = log_alpha.max()
+            log_alpha = np.log(np.maximum(np.exp(log_alpha - m) @ trans, 1e-300)) + m + log_emis[t]
+        log_alpha -= np.logaddexp.reduce(log_alpha)
+        out[t] = np.exp(log_alpha)
+    return out
+
+
 class AdvancedVolatilityFeatures:
 
     @staticmethod
@@ -65,13 +111,17 @@ class InformationalDynamicsFeatures:
 
     @staticmethod
     def adaptive_hurst_exponent(series: pd.Series, min_window: int = 10, max_window: int = 100) -> pd.Series:
+        lags = np.arange(2, 20)
+        log_lags = np.log(lags)
+
         def get_hurst(x):
             if len(x) < max_window: return 0.5
-            lags = range(2, 20)
-            tau = [np.sqrt(np.std(np.subtract(x[lag:], x[:-lag]))) for lag in lags]
-            poly = np.polyfit(np.log(lags), np.log(tau), 1)
-            return poly[0] * 2.0
-        return series.rolling(window=max_window).apply(get_hurst)
+            tau = [np.sqrt(np.std(x[lag:] - x[:-lag])) for lag in lags]
+            if min(tau) <= 0: return 0.5
+            return np.polyfit(log_lags, np.log(tau), 1)[0] * 2.0
+        # raw=True: ndarray en vez de Series -- mucho más rápido (era el 70%
+        # del tiempo total de transform()).
+        return series.rolling(window=max_window).apply(get_hurst, raw=True)
 
     @staticmethod
     def price_entropy(series: pd.Series, bins: int = 10, window: int = 40) -> pd.Series:
@@ -84,7 +134,7 @@ class InformationalDynamicsFeatures:
             except:
                 return 0
         returns = series.pct_change().dropna()
-        return returns.rolling(window=window).apply(calculate_shannon)
+        return returns.rolling(window=window).apply(calculate_shannon, raw=True)
 
 
 class SyntheticOptionsFeatures:
@@ -142,19 +192,27 @@ class MLHybridFeatures:
     @staticmethod
     def anomaly_score_isolation_forest(df: pd.DataFrame, prefix: str = "", window: int = 100) -> pd.Series:
         cols = [f'{prefix}Close', f'{prefix}Volume', f'{prefix}parkinson_gap']
-        data = df[cols].fillna(0)
-        iso = IsolationForest(n_estimators=100, contamination=0.05, random_state=42)
-        scores = iso.fit_predict(data)
-        return pd.Series(scores, index=df.index)
+        data = df[cols].fillna(0).values
+        out = np.full(len(df), np.nan)
+        for t, end in _causal_blocks(len(df)):
+            iso = IsolationForest(n_estimators=100, contamination=0.05, random_state=42)
+            iso.fit(data[:t])
+            out[t:end] = iso.predict(data[t:end])
+        return pd.Series(out, index=df.index)
 
     @staticmethod
     def market_regime_clustering(df: pd.DataFrame, prefix: str = "", n_clusters: int = 3) -> pd.Series:
-        features = df[[f'{prefix}asym_vol', f'{prefix}hurst']].fillna(0)
-        scaler = StandardScaler()
-        scaled_features = scaler.fit_transform(features)
-        kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
-        clusters = kmeans.fit_predict(scaled_features)
-        return pd.Series(clusters, index=df.index)
+        features = df[[f'{prefix}asym_vol', f'{prefix}hurst']].fillna(0).values
+        out = np.full(len(df), np.nan)
+        for t, end in _causal_blocks(len(df)):
+            scaler = StandardScaler().fit(features[:t])
+            kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
+            kmeans.fit(scaler.transform(features[:t]))
+            # Etiquetas ordenadas por volatilidad del centroide -> el cluster
+            # 0 es siempre el de menor vol (antes la numeración era arbitraria).
+            rank = np.argsort(np.argsort(kmeans.cluster_centers_[:, 0]))
+            out[t:end] = rank[kmeans.predict(scaler.transform(features[t:end]))]
+        return pd.Series(out, index=df.index)
 
     @staticmethod
     def autoencoder_bottleneck(df: pd.DataFrame, prefix: str = "", bottleneck_dim: int = 4):
@@ -218,7 +276,7 @@ class LiquidityMicrostructureFeatures:
         if target_col in df.columns:
             spread = df[target_col]
         else:
-            spread = pd.Series(np.random.rand(len(df)) * 0.001, index=df.index)
+            spread = pd.Series(0.0, index=df.index)  # antes: np.random (ruido)
         recovery = spread.diff(window).fillna(0)
         resilience = (high_vol_event * -recovery)
         return resilience.rolling(window=window).mean()
@@ -393,7 +451,9 @@ class SyntheticEngineFeatures:
     @staticmethod
     def replication_cost_dynamic(df: pd.DataFrame, prefix: str = "", risk_free_rate: float = 0.04) -> pd.Series:
         underlying_spread = df[f'{prefix}norm_spread']
-        synthetic_spread_est = underlying_spread * np.random.uniform(3, 5, len(df))
+        # FIX: antes multiplicaba por np.random.uniform(3, 5) -- ruido no
+        # reproducible entre entrenamiento y predicción. Se usa el punto medio.
+        synthetic_spread_est = underlying_spread * 4.0
         carry_cost = risk_free_rate / 252
         return synthetic_spread_est + carry_cost
 
@@ -417,9 +477,12 @@ class SyntheticArbitrageML:
     @staticmethod
     def arbitrage_anomaly_score(df: pd.DataFrame, prefix: str = "") -> pd.Series:
         features = [f'{prefix}norm_spread', f'{prefix}asym_vol']
-        data = df[features].fillna(0)
-        iso = IsolationForest(contamination=0.05, random_state=42)
-        return pd.Series(iso.fit_predict(data), index=df.index)
+        data = df[features].fillna(0).values
+        out = np.full(len(df), np.nan)
+        for t, end in _causal_blocks(len(df)):
+            iso = IsolationForest(contamination=0.05, random_state=42).fit(data[:t])
+            out[t:end] = iso.predict(data[t:end])
+        return pd.Series(out, index=df.index)
 
 
 class MarkovRegimeFeatures:
@@ -430,29 +493,35 @@ class MarkovRegimeFeatures:
         returns = np.log(df[f'{prefix}Close'] / df[f'{prefix}Close'].shift(1)).fillna(0)
         vol = df[f'{prefix}parkinson_gap'].fillna(0)
         obs = np.column_stack([returns, vol])
-        try:
-            model = hmm.GaussianHMM(n_components=n_states, covariance_type="diag", n_iter=100, random_state=42)
-            model.fit(obs)
-            probs = model.predict_proba(obs)
-        except:
-            probs = np.zeros((len(df), n_states))
+        probs = np.full((len(df), n_states), np.nan)
+        for t, end in _causal_blocks(len(df)):
+            try:
+                model = hmm.GaussianHMM(n_components=n_states, covariance_type="diag", n_iter=100, random_state=42)
+                model.fit(obs[:t])
+                # Probabilidades FILTRADAS (forward) -- predict_proba usa
+                # forward-backward y mira observaciones futuras.
+                start = max(0, t - 500)
+                filtered = _hmm_filtered_probs(model, obs[start:end])[t - start:]
+                # Estados ordenados por volatilidad media (estado 0 = calma).
+                order = np.argsort(model.means_[:, 1])
+                probs[t:end] = filtered[:, order]
+            except Exception:
+                continue
         state_cols = [f'{prefix}hmm_state_{i}_prob' for i in range(n_states)]
         return pd.DataFrame(probs, index=df.index, columns=state_cols)
 
     @staticmethod
     def order_flow_transition_matrix(df: pd.DataFrame, prefix: str = "", bins: int = 3, window: int = 100) -> pd.Series:
-        delta = df[f'{prefix}cum_delta_aggr'].fillna(0)
-        try:
-            states = pd.qcut(delta, q=bins, labels=False, duplicates='drop').values
-        except:
-            return pd.Series(0, index=df.index)
-
-        out = np.full(len(states), 0.5)
-        for i in range(window, len(states)):
-            segment = states[i-window:i]
-            transitions_to_low = np.sum((segment[:-1] != 0) & (segment[1:] == 0))
-            total_transitions = window - 1
-            out[i] = transitions_to_low / total_transitions
+        delta = df[f'{prefix}cum_delta_aggr'].fillna(0).values
+        out = np.full(len(delta), 0.5)
+        qs = np.linspace(0, 1, bins + 1)[1:-1]
+        for i in range(window, len(delta)):
+            # FIX: los cuantiles se calculaban con pd.qcut sobre la serie
+            # COMPLETA (look-ahead). Ahora salen de la propia ventana pasada.
+            segment = delta[i-window:i]
+            states = np.searchsorted(np.quantile(segment, qs), segment, side='right')
+            transitions_to_low = np.sum((states[:-1] != 0) & (states[1:] == 0))
+            out[i] = transitions_to_low / (window - 1)
 
         return pd.Series(out, index=df.index)
 
@@ -460,11 +529,12 @@ class MarkovRegimeFeatures:
     def hmm_log_likelihood_anomaly(df: pd.DataFrame, prefix: str = "", window: int = 100) -> pd.Series:
         returns = np.log(df[f'{prefix}Close'] / df[f'{prefix}Close'].shift(1)).fillna(0).values.reshape(-1, 1)
         out = np.zeros(len(returns))
-        model = hmm.GaussianHMM(n_components=2, covariance_type="diag")
-
         for i in range(window, len(returns), 5):
             chunk = returns[i-window:i]
             try:
+                # Modelo nuevo por ventana: reusar la instancia re-inicializaba
+                # igual los parámetros y llenaba el log de warnings de hmmlearn.
+                model = hmm.GaussianHMM(n_components=2, covariance_type="diag", random_state=42)
                 model.fit(chunk)
                 out[i:i+5] = model.score(returns[i].reshape(-1, 1))
             except:
@@ -523,11 +593,17 @@ class RiskFeaturePipeline:
             df_out[f'{prefix}cum_delta_aggr'] = self.order_flow.aggressive_cumulative_delta(df_out, prefix=prefix)
             df_out[f'{prefix}dist_poc'] = self.order_flow.dynamic_volume_profile_stats(df_out, prefix=prefix)
             df_out[f'{prefix}footprint_imb'] = self.order_flow.footprint_momentum_imbalance(df_out, prefix=prefix)
-            df_out[f'{prefix}book_skew'] = self.book_adv.book_skew_asymmetry(df_out, prefix=prefix)
+            # book_skew_asymmetry ya NO se calcula: generaba np.random.gamma
+            # por fila (ruido puro, sin datos L2 reales detrás).
 
             df_out[f'{prefix}hurst'] = self.info_dyn.adaptive_hurst_exponent(series)
             df_out[f'{prefix}entropy'] = self.info_dyn.price_entropy(series)
-            df_out[f'{prefix}cross_mom'] = self.info_dyn.cross_correlation_momentum(series, benchmark_series)
+            if asset != benchmark_name:
+                df_out[f'{prefix}cross_mom'] = self.info_dyn.cross_correlation_momentum(series, benchmark_series)
+            else:
+                # Contra sí mismo la correlación es 1 y la feature daba 0
+                # constante -- se deja solo el momentum exponencial.
+                df_out[f'{prefix}cross_mom'] = series.pct_change().ewm(alpha=0.05).mean()
             df_out[f'{prefix}implied_sentiment'] = self.opt_sent.implied_vol_skew_proxy(df_out, prefix=prefix)
 
             df_out[f'{prefix}delta_synth'] = self.synth_opt.synthetic_delta(series, df_out[f'{prefix}asym_vol'])
@@ -540,13 +616,15 @@ class RiskFeaturePipeline:
             df_out[f'{prefix}anomaly_score'] = self.ml_hybrid.anomaly_score_isolation_forest(df_out, prefix=prefix)
             df_out[f'{prefix}market_cluster'] = self.ml_hybrid.market_regime_clustering(df_out, prefix=prefix)
 
-            ae_features = self.ml_hybrid.autoencoder_bottleneck(df_out, prefix=prefix)
-            df_out = pd.concat([df_out, ae_features], axis=1)
+            # autoencoder_bottleneck ya NO se agrega: era una red nueva sin
+            # entrenar en cada llamada -> 'ae_dim_*' significaba algo
+            # distinto en entrenamiento y en predicción.
 
             hmm_probs = self.markov.gaussian_hmm_regimes(df_out, prefix=prefix)
             df_out = pd.concat([df_out, hmm_probs], axis=1)
             df_out[f'{prefix}crash_trans_prob'] = self.markov.order_flow_transition_matrix(df_out, prefix=prefix)
             df_out[f'{prefix}hmm_likelihood'] = self.markov.hmm_log_likelihood_anomaly(df_out, prefix=prefix)
 
-        df_out = df_out.iloc[100:].ffill().bfill()
+        # Sin bfill(): rellenaba el warm-up con valores FUTUROS.
+        df_out = df_out.iloc[100:].ffill()
         return df_out

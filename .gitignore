@@ -16,6 +16,11 @@ dist/
 *.parquet
 data/raw/
 data/processed/
+data/binance_vision/
+data/feature_cache/
+data/crypto/
+data/macro/
+backtest_results/
 
 # IDEs
 .vscode/

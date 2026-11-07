@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neural-risk"
+version = "0.2.0"
+description = "Crypto quant toolkit: Binance Futures derivatives data loader, causal flow/positioning features and a multi-expert risk engine."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Lucas Alvarez", email = "lucasalvarez21k@gmail.com" }]
+keywords = ["quant", "crypto", "trading", "binance", "futures", "risk", "backtesting", "machine-learning"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# Core liviano: alcanza para BinanceVisionLoader, derivatives_features,
+# métricas, agente y hedging. Los modelos pesados van en extras.
+dependencies = [
+    "numpy>=1.23",
+    "pandas>=1.5",
+    "scipy>=1.9",
+    "scikit-learn>=1.2",
+]
+
+[project.optional-dependencies]
+ml = [
+    "torch>=2.0",
+    "xgboost>=1.7",
+    "hmmlearn>=0.2.7",
+    "arch>=5.3",
+    "statsmodels>=0.13",
+    "networkx>=3.0",
+]
+data = [
+    "ccxt>=2.0",
+    "yfinance>=0.2",
+    "requests>=2.28",
+]
+all = ["neural-risk[ml,data]"]
+
+[project.urls]
+Homepage = "https://github.com/alvarez1lucas/neural_risk"
+Repository = "https://github.com/alvarez1lucas/neural_risk"
+Issues = "https://github.com/alvarez1lucas/neural_risk/issues"
+
+[tool.setuptools.packages.find]
+include = ["neural_risk*"]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["*.png", "*.txt", "*.code-workspace", "*.ipynb"]

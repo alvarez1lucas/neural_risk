@@ -34,7 +34,7 @@ def main():
     try:
         df = pd.read_sql("SELECT asset, COUNT(*) as filas, MAX(timestamp) as ultimo_dato FROM market_data GROUP BY asset", conn)
         print("\n[1] MARKET DATA (histórico disponible por activo)")
-        print(df.to_string(index=False) if len(df) else "  (vacío -- ¿corriste seed_market_data.py o run_data_fetcher.py?)")
+        print(df.to_string(index=False) if len(df) else "  (vacío -- ¿corriste run_data_fetcher.py?)")
     except Exception as e:
         print(f"\n[1] MARKET DATA: error -- {e}")
 
