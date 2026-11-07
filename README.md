@@ -252,5 +252,3 @@ Los resultados se guardan en `backtest_results/`: equity, trades, métricas y gr
 - ✅ Motor original auditado, corregido y ejecutable de punta a punta (sin ventaja predictiva sobre datos OHLCV diarios).
 - ✅ Pipeline intradía de derivados con ventaja fuera de muestra en 3 activos, neta de costos.
 - ⏳ Pendiente: paper trading en el testnet de Binance Futures, dimensionamiento de la posición según la volatilidad, y conectar la señal ridge al executor live.
-
-Ver [`STATUS.md`](STATUS.md) para el historial de la auditoría.
