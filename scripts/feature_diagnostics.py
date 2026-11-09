@@ -29,10 +29,10 @@ from _pathutils import project_root
 import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
-from sklearn.linear_model import Ridge
-from sklearn.preprocessing import StandardScaler
 
 from neural_risk.data.derivatives_features import build_derivatives_features
+from neural_risk.research import extreme_signal, forward_return, ridge_walk_forward
+from backtest_intraday import load
 
 warnings.filterwarnings('ignore')
 for _s in (sys.stdout, sys.stderr):
@@ -47,40 +47,6 @@ COSTS_BPS = {
     'futures_taker': 2 * (5 + 1),    # 0.05% + ~1bp slippage en BTC perp
     'futures_maker': 2 * 2,          # 0.02% maker, sin slippage (pero con riesgo de no-fill)
 }
-
-
-def forward_return(f: pd.DataFrame, h: int) -> pd.Series:
-    close, open_ = f.attrs['close'], f.attrs['open']
-    return close.shift(-h) / open_.shift(-1) - 1
-
-
-def extreme_signal(x: pd.Series, window: int, q: float = 0.1) -> pd.Series:
-    hi = x.rolling(window, min_periods=window // 2).quantile(1 - q)
-    lo = x.rolling(window, min_periods=window // 2).quantile(q)
-    return pd.Series(np.where(x > hi, 1.0, np.where(x < lo, -1.0, 0.0)), index=x.index).where(hi.notna())
-
-
-def ridge_walk_forward(X: pd.DataFrame, y: pd.Series, h: int, retrain_every: int, min_train: int) -> pd.Series:
-    pred = pd.Series(np.nan, index=X.index)
-    Xv = X.values
-    yv = y.values
-    for start in range(min_train, len(X), retrain_every):
-        train_end = start - h  # el target de las últimas h filas todavía no se conoce
-        tr = slice(0, train_end)
-        Xt, yt = Xv[tr], yv[tr]
-        ok = ~np.isnan(Xt).any(axis=1) & ~np.isnan(yt)
-        if ok.sum() < 500:
-            continue
-        sc = StandardScaler().fit(Xt[ok])
-        model = Ridge(alpha=10.0).fit(np.clip(sc.transform(Xt[ok]), -5, 5), yt[ok])
-        te = slice(start, min(start + retrain_every, len(X)))
-        Xe = Xv[te]
-        okp = ~np.isnan(Xe).any(axis=1)
-        out = np.full(len(Xe), np.nan)
-        if okp.any():
-            out[okp] = model.predict(np.clip(sc.transform(Xe[okp]), -5, 5))
-        pred.iloc[te] = out
-    return pred
 
 
 def analyze(f: pd.DataFrame, tf: str, horizons, rng) -> dict:
@@ -167,11 +133,7 @@ def main():
     p.add_argument('--horizons', nargs='+', type=int, default=[1, 4, 12])
     args = p.parse_args()
 
-    base = os.path.join(project_root(), 'data', 'binance_vision')
-    k5 = pd.read_pickle(os.path.join(base, f'{args.symbol}_klines_5m.pkl'))
-    prem = pd.read_pickle(os.path.join(base, f'{args.symbol}_premium_5m.pkl'))
-    fund = pd.read_pickle(os.path.join(base, f'{args.symbol}_funding.pkl'))
-    met = pd.read_pickle(os.path.join(base, f'{args.symbol}_metrics_5m.pkl'))
+    k5, prem, fund, met = load(args.symbol)
 
     rng = np.random.default_rng(0)
     results = {'symbol': args.symbol, 'costs_bps': COSTS_BPS, 'timeframes': {}}

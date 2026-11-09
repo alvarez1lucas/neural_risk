@@ -190,9 +190,37 @@ Lo mismo se repite en los tres activos (Sharpe con futuros taker, 1x):
 - **El retorno está concentrado en 2023-2024.** En 2021-2022 el resultado fue de -22% a +35% según el activo. En los últimos 12 meses: BTC +44%, SOL +8%, **ETH -2%**. La ventaja puede estar achicándose.
 - **Un drawdown de -45% a 1x es alto.** Conviene dimensionar la posición según la volatilidad en vez de usar siempre el 100% del capital.
 - El backtest no modela fills parciales de órdenes maker, slippage real en activos menos líquidos (SOL) ni impacto de mercado con capital grande.
+- **Corrección por pruebas múltiples.** Contra los 5 modelos comparados, el ridge pasa con holgura (Deflated Sharpe 0.99). Pero entre la grilla de robustez y la comparación de modelos se probaron ~90 configuraciones. Contando todas, el Deflated Sharpe baja a **0.87**, por debajo del 95% de confianza. La ventaja es probable, pero todavía no es concluyente.
 - Falta validación en vivo: el siguiente paso es paper trading en el testnet de Binance Futures.
 
 ---
+
+## Investigación reproducible (`neural_risk.research`, v0.3.0)
+
+El walk-forward, el backtest de perpetuos y la validación estadística son parte de la librería. Solo necesitan el core (sin torch):
+
+```python
+from sklearn.linear_model import Ridge
+from neural_risk.data.binance_vision import BinanceVisionLoader, DEFAULT_UNIVERSE
+from neural_risk.data.derivatives_features import build_derivatives_features
+from neural_risk.research import (walk_forward, forward_return, simulate, stats,
+                                  deflated_sharpe_ratio, probability_of_backtest_overfitting,
+                                  ExperimentRegistry)
+
+loader = BinanceVisionLoader("data/binance_vision")
+loader.download_symbol("ETHUSDT", start="2021-01")          # una vez; queda en caché
+f = build_derivatives_features(*loader.load_symbol("ETHUSDT"), rule="30m")
+
+y = forward_return(f, h=48)                                  # open siguiente -> close a 24h
+pred = walk_forward(lambda: Ridge(alpha=10), f, y, h=48,
+                    retrain_every=48 * 30, min_train=48 * 180)
+```
+
+- **`walk_forward`** acepta cualquier modelo con `fit`/`predict`. Todos compiten con las mismas features, el mismo target y los mismos cortes temporales, sin ver el futuro.
+- **`simulate`** reproduce el backtest de futuros: entrada al open siguiente, comisiones, funding real y liquidación por apalancamiento.
+- **`deflated_sharpe_ratio`** corrige el Sharpe según **cuántas variantes se probaron**. Con muchas pruebas, la mejor siempre parece buena por azar.
+- **`probability_of_backtest_overfitting`** (CSCV) mide si elegir "la mejor variante" dentro de muestra se sostiene fuera de muestra.
+- **`ExperimentRegistry`** anota cada corrida, incluidas las descartadas, para saber el número real de pruebas.
 
 ## Ingeniería y debugging destacado
 

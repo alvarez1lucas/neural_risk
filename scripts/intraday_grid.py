@@ -20,8 +20,8 @@ import numpy as np
 import pandas as pd
 
 from neural_risk.data.derivatives_features import build_derivatives_features
-from feature_diagnostics import ridge_walk_forward, forward_return
-from backtest_intraday import load, simulate, stats, COST_PER_SIDE
+from neural_risk.research import COST_PER_SIDE, forward_return, ridge_walk_forward, simulate, stats
+from backtest_intraday import load
 
 for _s in (sys.stdout, sys.stderr):
     try:

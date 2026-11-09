@@ -135,3 +135,61 @@ class BinanceVisionLoader:
         cols = ['sum_open_interest', 'sum_open_interest_value', 'count_toptrader_long_short_ratio',
                 'sum_toptrader_long_short_ratio', 'count_long_short_ratio', 'sum_taker_long_short_vol_ratio']
         return df[cols].apply(pd.to_numeric, errors='coerce')
+
+    # ------------------------------------------------------------------
+    # Datasets completos por símbolo (lo que consumen los pipelines)
+    # ------------------------------------------------------------------
+    DATASETS = ('klines_5m', 'premium_5m', 'funding', 'metrics_5m')
+
+    def dataset_path(self, symbol: str, name: str) -> str:
+        return os.path.join(self.cache_dir, f"{symbol}_{name}.pkl")
+
+    def has_symbol(self, symbol: str) -> bool:
+        return all(os.path.exists(self.dataset_path(symbol, n)) for n in self.DATASETS)
+
+    def download_symbol(self, symbol: str, start: str = '2021-01', end: Optional[str] = None,
+                        overwrite: bool = False) -> dict:
+        """
+        Baja (o reutiliza del caché) los 4 datasets de un símbolo y los guarda
+        como {symbol}_{klines_5m,premium_5m,funding,metrics_5m}.pkl.
+        start/end: 'YYYY-MM' (end = último mes completo si no se pasa).
+        Devuelve {dataset: filas}. Un símbolo listado después de `start`
+        simplemente empieza más tarde.
+        """
+        if end is None:
+            end = (pd.Timestamp.now(tz='UTC').tz_localize(None).to_period('M') - 1).strftime('%Y-%m')
+        last_day = (pd.Period(end, 'M').end_time.normalize()).strftime('%Y-%m-%d')
+        builders = {
+            'klines_5m': lambda: self.klines(symbol, '5m', start, end),
+            'premium_5m': lambda: self.premium_index(symbol, '5m', start, end),
+            'funding': lambda: self.funding_rate(symbol, start, end),
+            'metrics_5m': lambda: self.metrics(symbol, f"{start}-01", last_day),
+        }
+        rows = {}
+        for name, build in builders.items():
+            path = self.dataset_path(symbol, name)
+            if os.path.exists(path) and not overwrite:
+                rows[name] = len(pd.read_pickle(path))
+                continue
+            df = build()
+            if df.empty:
+                raise ValueError(f"{symbol}: sin datos de {name} en data.binance.vision")
+            df.to_pickle(path)
+            rows[name] = len(df)
+        return rows
+
+    def load_symbol(self, symbol: str) -> tuple:
+        """(klines_5m, premium_5m, funding, metrics_5m) desde el caché local."""
+        missing = [n for n in self.DATASETS if not os.path.exists(self.dataset_path(symbol, n))]
+        if missing:
+            raise FileNotFoundError(f"{symbol}: faltan {missing}. Corré download_symbol('{symbol}') primero.")
+        return tuple(pd.read_pickle(self.dataset_path(symbol, n)) for n in self.DATASETS)
+
+
+# Perpetuos USDⓈ-M líquidos con histórico largo en data.binance.vision.
+# Punto de partida para estudios cross-sectional; ajustable.
+DEFAULT_UNIVERSE = [
+    'BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT', 'ADAUSDT',
+    'AVAXUSDT', 'LINKUSDT', 'DOTUSDT', 'LTCUSDT', 'BCHUSDT', 'TRXUSDT', 'ATOMUSDT',
+    'NEARUSDT', 'FILUSDT', 'ETCUSDT', 'UNIUSDT', 'AAVEUSDT', 'APTUSDT',
+]

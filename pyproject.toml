@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "neural-risk"
-version = "0.2.0"
+version = "0.3.0"
 description = "Crypto quant toolkit: Binance Futures derivatives data loader, causal flow/positioning features and a multi-expert risk engine."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -45,11 +45,17 @@ data = [
     "requests>=2.28",
 ]
 all = ["neural-risk[ml,data]"]
+dev = ["pytest>=7"]
 
 [project.urls]
 Homepage = "https://github.com/alvarez1lucas/neural_risk"
 Repository = "https://github.com/alvarez1lucas/neural_risk"
 Issues = "https://github.com/alvarez1lucas/neural_risk/issues"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-p no:cacheprovider"
 
 [tool.setuptools.packages.find]
 include = ["neural_risk*"]

@@ -20,29 +20,18 @@ import pandas as pd
 from scipy.stats import spearmanr
 from sklearn.linear_model import Ridge
 from sklearn.neural_network import MLPRegressor
-from sklearn.preprocessing import StandardScaler
 import xgboost as xgb
 
 from neural_risk.data.derivatives_features import build_derivatives_features
-from feature_diagnostics import forward_return
-from backtest_intraday import load, simulate, stats
+from neural_risk.research import (BINANCE_FEES, adaptive_ensemble, forward_return, simulate,
+                                  stats, walk_forward, weighted_ensemble)
+from backtest_intraday import load
 
 for _s in (sys.stdout, sys.stderr):
     try:
         _s.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
         pass
-
-# Comisiones Binance (VIP 0). Futuros USDⓈ-M: maker 0.02% / taker 0.05%;
-# con descuento BNB (10%): 0.018% / 0.045%. Spot: 0.10% (0.075% con BNB).
-# + slippage estimado por lado (BTC perp es muy líquido).
-BINANCE_FEES = {
-    'spot_taker_vip0':        0.0010 + 0.0005,
-    'futures_taker_vip0':     0.0005 + 0.0001,
-    'futures_taker_bnb':      0.00045 + 0.0001,
-    'futures_maker_vip0':     0.0002,
-    'futures_maker_bnb':      0.00018,
-}
 
 MODELS = {
     'ridge': lambda: Ridge(alpha=10.0),
@@ -52,75 +41,6 @@ MODELS = {
     'mlp': lambda: MLPRegressor(hidden_layer_sizes=(32, 16), alpha=1e-3, learning_rate_init=1e-3,
                                 max_iter=50, early_stopping=True, random_state=42),
 }
-
-
-def walk_forward(model_name, X, y, h, retrain_every, min_train):
-    pred = pd.Series(np.nan, index=X.index)
-    Xv, yv = X.values, y.values
-    for start in range(min_train, len(X), retrain_every):
-        tr_end = start - h
-        Xt, yt = Xv[:tr_end], yv[:tr_end]
-        ok = ~np.isnan(Xt).any(axis=1) & ~np.isnan(yt)
-        if ok.sum() < 500:
-            continue
-        sc = StandardScaler().fit(Xt[ok])
-        yt_ok = yt[ok]
-        y_scale = yt_ok.std()
-        model = MODELS[model_name]()
-        model.fit(np.clip(sc.transform(Xt[ok]), -5, 5), yt_ok / y_scale)
-        te = slice(start, min(start + retrain_every, len(X)))
-        Xe = Xv[te]
-        okp = ~np.isnan(Xe).any(axis=1)
-        out = np.full(len(Xe), np.nan)
-        if okp.any():
-            out[okp] = model.predict(np.clip(sc.transform(Xe[okp]), -5, 5))
-        pred.iloc[te] = out
-    return pred
-
-
-def rolling_z(pred: pd.Series, window: int) -> pd.Series:
-    """Normalización CAUSAL (antes: rank(pct=True) sobre toda la serie = look-ahead)."""
-    mp = window // 2
-    return (pred - pred.rolling(window, min_periods=mp).mean()) / (pred.rolling(window, min_periods=mp).std() + 1e-12)
-
-
-def weighted_ensemble(preds: dict, weights: dict, window: int) -> pd.Series:
-    """Promedio ponderado FIJO de las predicciones normalizadas."""
-    return sum(w * rolling_z(preds[name], window) for name, w in weights.items()) / sum(weights.values())
-
-
-def adaptive_ensemble(preds: dict, y: pd.Series, h: int, window: int, step: int,
-                      lookback: int) -> tuple:
-    """
-    Pesos ADAPTATIVOS y causales: cada `step` barras, el peso de cada modelo
-    es su IC (Spearman) en las `lookback` barras anteriores, usando solo
-    targets ya conocidos (se corta h barras antes). IC negativo -> peso 0.
-    Es lo que el agente debería hacer con Thompson Sampling: premiar al
-    modelo que viene acertando, pero midiéndolo barra a barra en vez de
-    esperar trades cerrados.
-    """
-    names = list(preds)
-    z = pd.DataFrame({n: rolling_z(preds[n], window) for n in names})
-    out = pd.Series(np.nan, index=z.index)
-    history = []
-    for start in range(0, len(z), step):
-        end_known = start - h
-        w = {n: 0.0 for n in names}
-        if end_known > lookback // 2:
-            sl = slice(max(0, end_known - lookback), end_known)
-            for n in names:
-                m = z[n].iloc[sl].notna() & y.iloc[sl].notna()
-                if m.sum() > 100:
-                    w[n] = max(spearmanr(z[n].iloc[sl][m], y.iloc[sl][m])[0], 0.0)
-        total = sum(w.values())
-        if total == 0:
-            w = {n: 1.0 / len(names) for n in names}
-        else:
-            w = {n: v / total for n, v in w.items()}
-        te = slice(start, min(start + step, len(z)))
-        out.iloc[te] = sum(w[n] * z[n].iloc[te] for n in names)
-        history.append({'desde': str(z.index[start]), **{n: round(v, 3) for n, v in w.items()}})
-    return out, pd.DataFrame(history)
 
 
 def main():
@@ -147,7 +67,7 @@ def main():
         preds = {}
         for name in MODELS:
             t0 = time.time()
-            preds[name] = walk_forward(name, X, y, hold, per_day * 30, per_day * 180)
+            preds[name] = walk_forward(MODELS[name], X, y, hold, per_day * 30, per_day * 180, scale_y=True)
             print(f"{name}: {time.time() - t0:.0f}s", flush=True)
         pd.to_pickle(preds, cache)
 
